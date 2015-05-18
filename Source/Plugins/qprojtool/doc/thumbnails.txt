@@ -1,0 +1,1 @@
+<a href="image2.gif" ><img src="image1.gif"/></a> 

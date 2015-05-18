@@ -1,0 +1,34 @@
+QToolButton 
+{ 
+	background-color: transparent; border: none; width: 20px; height: 20px;
+} 
+
+QToolButton:pressed 
+{ 
+	margin-top: 1px; 
+}
+QToolButton#playPause
+{
+	background-image: url(:/icons/icons/play_pause2.png); 
+}
+QToolButton#forward
+{
+	background-image: url(:/icons/icons/forward.png); 
+}
+QToolButton#backward
+{
+	background-image: url(:/icons/icons/backward.png); 
+}
+
+QToolButton#playPause:hover
+{
+	background-image: url(:/icons/icons/play_pause_hower.png);
+}
+QToolButton#forward:hover
+{
+	background-image: url(:/icons/icons/forward_hower.png); 
+}
+QToolButton#backward:hover
+{
+	background-image: url(:/icons/icons/backward_hower.png); 
+}

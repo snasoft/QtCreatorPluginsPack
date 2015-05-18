@@ -1,0 +1,23 @@
+v.0.9.4 2015-04-09
+* Ported to Qt5 and QtCreator 3.4.0 rc1.
+* Internationalization added.
+* Russian translation added.
+* Fixed zero project lines count at the begining Qt Creator session.
+* Minor tests improvements.
+
+v.0.9.3 2014-03-17
+* Changed plugin name to ProjectLineCounter.
+* Added tests projects.
+* Fixed line counting when opening Unix files on Windows.
+
+v.0.9.2 2014-03-12
+* Faster lines count.
+* No freeze on big projects.
+* Added multithreading lines count.
+* Fixed crash if ui file opened in editor. 
+
+v.0.9.1 2014-03-05
+* Source code polished.
+
+v.0.9.0 2014-03-04
+* Initial release.

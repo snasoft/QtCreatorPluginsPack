@@ -1,0 +1,3090 @@
+/*
+Copyright 2010-2012 Sergey Levin
+
+
+This file is part of crosti.
+
+Crosti is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Crosti is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with crosti.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+#include "mainwindow.h"
+#include "imagefilter.h"
+#include "progressdialog.h"
+#include "schemedata.h"
+#include "toolbar.h"
+#include "info.h"
+#include "history.h"
+#include "cminimap.h"
+#include "cimageviewer.h"
+#include "cschemeviewer.h"
+#include "cviewportwatcher.h"
+
+#include <QTranslator>
+#include <QDesktopWidget>
+#include <QColor>
+#include <QStatusBar>
+#include <QMenuBar>
+#include <QColorDialog>
+#include <QFontDialog>
+#include <QFileDialog>
+#include <QStyleFactory>
+#include <QStandardItemModel>
+#include <QImageReader>
+#include <QImageWriter>
+#include <QTime>
+#include <QMessageBox>
+#include <QtCore/qmath.h>
+
+#if QT_VERSION >= 0x050000
+#include <QtPrintSupport/QPrintPreviewDialog>
+#else
+#include <QPrintPreviewDialog>
+#endif
+
+
+
+int dL=2;//Превышение ширины толстой линии по сравнению с тонкой
+int linePix=3;//Ширина тонкой линии
+int lineBoldPix=linePix+dL;//Ширина толстой линии
+int dl=6;//Превышение ширины ребра клетки над шириной пиктограммы
+
+int square=0;//Квадрат загруженной (или созданной) схемы
+
+const char NO_ICON = -1;
+const QString NO_STYLE = "none";
+
+
+
+void installTranslator(const QString &language)
+{
+    static QTranslator *translator_qt = 0;
+    static QTranslator *translator_app = 0;
+
+    if (translator_qt) {
+        QApplication::removeTranslator(translator_qt);
+        delete translator_qt;
+    }
+
+    if (translator_app) {
+        QApplication::removeTranslator(translator_app);
+        delete translator_app;
+    }
+
+    if (language != "en") {
+        //---Загрузка переводчика для внутренних классов qt
+        translator_qt = new QTranslator(qApp);
+        if (translator_qt->load("qt_" + language,
+                                Info::dataPath() + "/system/translations"))
+            QApplication::installTranslator(translator_qt);
+
+        //---Загрузка переводчика программы
+        translator_app = new QTranslator(qApp);
+        if (translator_app->load("crosti_" + language,
+                                 Info::dataPath() + "/system/translations"))
+            QApplication::installTranslator(translator_app);
+    }
+}
+
+
+
+static float scaleToDesktop(const QSize &sz){
+    int w=QApplication::desktop()->availableGeometry().width();
+    int h=QApplication::desktop()->availableGeometry().height();
+    float scaleW=w,scaleH=h;
+    if(sz.width()>w)scaleW/=sz.width();else scaleW=1;
+    if(sz.height()>h)scaleH/=sz.height();else scaleH=1;
+    return (scaleW>scaleH)?scaleH:scaleW;
+}
+
+
+
+int MainWindow::analyzeSuffix(QString ext){
+    ext = ext.toLower();
+    if (QImageReader::supportedImageFormats().contains(ext.toLatin1()))
+        return 0;
+    if (ext == "cst")
+        return 1;
+    if (ext == "pdf")
+        return 2;
+
+    return -1;
+}
+
+
+
+void MainWindow::checkSuffix(QString *fileName,QString nameFilter)
+{
+  QFileInfo fi(*fileName);
+  if(fi.suffix()==""){
+    nameFilter.chop(1);
+    QString filter=nameFilter.section('.',1);
+    QStringList extList=filter.split(" *.",QString::SkipEmptyParts,Qt::CaseInsensitive);
+    if(extList.size()!=0)*fileName+="."+extList.at(0);
+  }
+}
+
+
+
+void MainWindow::schemeModify(QStandardItem *item)
+{
+  int row=item->row();
+  QColor cl=QColor();
+  QColor colorNew=QColor();
+
+
+  if(item->column()==0){
+      QRgb clNew(item->data(Qt::UserRole).toUInt());
+      QRgb clOld=colorTable.at(row);
+
+      cl.setRgba(clOld);
+      colorNew.setRgba(clNew);
+
+      colorTable.replace(row,clNew);
+
+      try{
+        ColorItem* ci=view->colorItem(row,clOld);
+        if(ci->size()!=0){
+          connect(ci,SIGNAL(changed(int,QColor)),SLOT(colorUpdate(int,QColor)));
+          view->history.append(ci);
+        }
+      }catch(const std::bad_alloc&){
+        Info::messageSplash(Info::msgOutOfMemory);
+      }
+
+      view->colorUpdate(cl,colorNew);
+      setColor(row);
+  }
+  if(item->column()==1){
+      int num=item->data(Qt::UserRole).toInt();
+
+      id[row]=num;
+
+      QModelIndex index1=paletteModel->index(row,0);
+      cl.setRgba(QRgb(paletteModel->data(index1,Qt::UserRole).toUInt()));
+
+      try{
+        IconItem* ii=view->iconItem(row,cl);
+        if(ii->size()!=0){
+          connect(ii,SIGNAL(changed(int,int)),SLOT(iconUpdate(int,int)));
+          view->history.append(ii);
+        }
+      }catch(const std::bad_alloc&){
+        Info::messageSplash(Info::msgOutOfMemory);
+      }
+
+      view->iconUpdate(cl,num);
+      view->setIconSelected(num);
+      view->update();
+  }
+
+
+  _isColorTableUpdated=true;
+  if(ui.tabWidget->currentIndex()==2)colorTableCreate(true);
+}
+
+
+void MainWindow::setColor(int row){
+  QModelIndex index1=paletteModel->index(row,0);
+  QModelIndex index2=paletteModel->index(row,1);
+  ui.tvPalette->selectionModel()->setCurrentIndex(index1,QItemSelectionModel::Clear|QItemSelectionModel::Select|QItemSelectionModel::Rows);
+  QColor cl;
+  cl.setRgba(QRgb(paletteModel->data(index1,Qt::UserRole).toUInt()));
+  int id=paletteModel->data(index2,Qt::UserRole).toInt();
+  view->setIconSelected(id);
+  view->setColorSelected(cl);
+  view->update();
+}
+
+
+void MainWindow::setColor(const QModelIndex &index){
+ setColor(index.row());
+}
+
+
+void MainWindow::setClPicCount(){
+  QDir clpicDir(Info::dataPath()+"/system/clpics");
+  QStringList filter;
+  filter.append("clpic*.bmp");
+  _clpicCount=clpicDir.entryList(filter,QDir::Files).count();
+}
+
+
+void MainWindow::setImageList(int squarePix,int dl){
+ for(int i=0;i<_clpicCount;i++){
+   QImage image(Info::dataPath()+"/system/clpics/clpic"+QString::number(i)+".bmp");
+   image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+   image=image.scaled(squarePix-2*dl,squarePix-2*dl);
+   image.setAlphaChannel(image.createMaskFromColor(0xFFFFFFFF,Qt::MaskOutColor));
+   imageList.append(image);
+ }
+}
+
+
+MainWindow::MainWindow(QString fileName,QWidget *parent):QMainWindow(parent),
+    MiniMap(new CMiniMap),
+    MiniMapRectColor(Qt::white)
+{
+ Info::setParent(this);
+ setDockOptions(QMainWindow::AnimatedDocks);
+
+
+ _isSchemeCreated=false;
+ _schemeName="";
+ _imageName="";
+ _isColorTableUpdated=false;
+ _isSchemeUpdated=false;
+ _isConverted=false;
+
+ imgH=0;
+ imgW=0;
+ _angle=0;
+ colorTable.clear();
+ _bkColor=Qt::white;
+
+ setClPicCount();
+ 
+ imageList.clear();
+ 
+ 
+ view=new View(QSize(0,0));
+ 
+ 
+ for(int i=0;i<_clpicCount;i++){
+   QImage image(Info::dataPath()+"/system/clpics/clpic"+QString::number(i)+".bmp");
+   image.setAlphaChannel(image.createMaskFromColor(0xFFFFFFFF,Qt::MaskOutColor));
+   imageList.append(image);
+ }
+ 
+ 
+ 
+ 
+ QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+
+
+ MiniMapRectColor = rsettings.value("miniMapRectColor", QColor(Qt::white)).value<QColor>();
+
+
+ if(!rsettings.contains("wizard"))rsettings.setValue("wizard",true);
+ bool showWizard=rsettings.value("wizard").value<bool>();
+
+ if(!rsettings.contains("invertIcons"))rsettings.setValue("invertIcons",false);
+ if(!rsettings.contains("showGrid"))rsettings.setValue("showGrid",true);
+ if(!rsettings.contains("showIcons"))rsettings.setValue("showIcons",true);
+ if (!rsettings.contains("showColors")) rsettings.setValue("showColors", true);
+
+
+ if(!rsettings.contains("theme"))rsettings.setValue("theme","default");
+
+
+ if (!rsettings.contains("style")) {
+     QStringList styles = QStyleFactory::keys();
+     rsettings.setValue("style", styles.isEmpty() ?
+                            NO_STYLE :
+                            styles.first());
+ }
+ setStyle(rsettings.value("style").value<QString>());
+
+
+ if(!rsettings.contains("units"))rsettings.setValue("units",0);
+ setUnits(rsettings.value("units").value<int>());
+
+
+ if(!rsettings.contains("picturePath")){
+   //DATA_PATH!="" на Unix системах
+   if(QString(DATA_PATH)=="")rsettings.setValue("picturePath",Info::dataPath()+"/picture");
+   else rsettings.setValue("picturePath",QDir::homePath());
+ }
+ _picturePath=rsettings.value("picturePath").value<QString>();
+
+
+ if(!rsettings.contains("schemePath")){
+   //DATA_PATH!="" на Unix системах
+   if(QString(DATA_PATH)=="")rsettings.setValue("schemePath",Info::dataPath()+"/scheme");
+   else rsettings.setValue("schemePath",QDir::homePath());
+ }
+ _schemePath=rsettings.value("schemePath").value<QString>();
+
+ _mainFont=rsettings.value("font/mainfont").value<QFont>();
+
+
+ _mainFontHalf=_mainFont;
+ if (_mainFont.pointSize() >= 14)
+     _mainFontHalf.setPointSize(int(_mainFontHalf.pointSizeF() / 2));
+ else
+     _mainFontHalf.setPointSize(7);
+
+ _mainFontBold=_mainFont;
+ _mainFontBold.setBold(true);
+
+ _mainFontHalfBold=_mainFont;
+ if (_mainFont.pointSize() >= 14)
+     _mainFontHalfBold.setPointSize(int(_mainFontHalfBold.pointSizeF() / 2));
+ else
+     _mainFontHalfBold.setPointSize(7);
+ _mainFontHalfBold.setBold(true);
+
+
+ _language = Info::language();
+
+
+ programsettingsWindow=NULL;
+
+ ui.setupUi(this);
+
+
+ for(int i=0;i<ui.tabWidget->count();i++)
+   ui.tabWidget->setTabIcon(i,QIcon(Info::dataPath()+"/system/image/"+QString::number(i+1)+".png"));
+
+
+ //ui.imageView->setFocusProxy(ui.scaleSlider);
+
+
+ delegate=new comboBoxDelegate(&palette);
+ paletteModel=new QStandardItemModel(0,2);
+
+ ui.tvPalette->setModel(paletteModel);
+ paletteModel->setHeaderData(0,Qt::Horizontal,trUtf8("Color"),Qt::DisplayRole);
+ paletteModel->setHeaderData(1,Qt::Horizontal,trUtf8("Icon"),Qt::DisplayRole);
+ ui.tvPalette->setSelectionBehavior(QAbstractItemView::SelectRows);
+ ui.tvPalette->setSelectionMode(QAbstractItemView::SingleSelection);
+
+ ui.tvPalette->setItemDelegate(delegate);
+
+ connect(ui.tvPalette,SIGNAL(clicked(const QModelIndex&)),this,SLOT(setColor(const QModelIndex&)));
+
+    if (!rsettings.contains("schemeFilter")) rsettings.setValue("schemeFilter", 0);
+    ui.filterCb->setCurrentIndex(rsettings.value("schemeFilter").value<int>());
+    if(!rsettings.contains("schemeSquare"))rsettings.setValue("schemeSquare",36);
+    ui.squareSB->setValue(rsettings.value("schemeSquare").value<int>());
+    if(!rsettings.contains("toolLine"))rsettings.setValue("toolLine",2);
+    ui.sbLineWidth->setValue(rsettings.value("toolLine").value<int>());
+    if(!rsettings.contains("toolLineMode"))rsettings.setValue("toolLineMode",0);
+    ui.cbLineMode->setCurrentIndex(rsettings.value("toolLineMode").value<int>());
+    if(!rsettings.contains("crostiSquare"))rsettings.setValue("crostiSquare",14);
+    ui.squareSB1->setValue(rsettings.value("crostiSquare").value<int>());
+    if(!rsettings.contains("schemeLine"))rsettings.setValue("schemeLine",2);
+    ui.lineSB->setValue(rsettings.value("schemeLine").value<int>());
+    if(!rsettings.contains("crostiLine"))rsettings.setValue("crostiLine",3);
+    ui.lineSB1->setValue(rsettings.value("crostiLine").value<int>());
+    if(!rsettings.contains("crostiDl"))rsettings.setValue("crostiDl",3);
+    ui.dlSB->setValue(rsettings.value("crostiDl").value<int>());
+    if(!rsettings.contains("crostiColor"))rsettings.setValue("crostiColor", QColor(Qt::white));
+    _bkColor=rsettings.value("crostiColor").value<QColor>();
+    if(_bkColor.isValid())setBackground(_bkColor);
+
+
+ restoreGeometry(rsettings.value("windowGeometry").toByteArray());
+ restoreState(rsettings.value("windowState").toByteArray());
+ 
+ setFont(_mainFont);
+ setWindowIcon(QIcon(Info::dataPath()+"/system/image/crosti.png"));
+ setWindowTitle(QApplication::applicationName());
+ setStatusBar(new QStatusBar());
+
+
+ QList<QDockWidget*> dockWidget = QList<QDockWidget*>() << ui.dwImage
+                                                        << ui.dwPalette
+                                                        << ui.dwTool
+                                                        << ui.dwCrosti
+                                                        << ui.dwMiniMap;
+ for (int i = 0; i < dockWidget.count(); ++i) {
+     dockWidget[i]->setEnabled(false);
+     dockWidget[i]->setWindowIcon(QIcon(Info::dataPath()+"/system/image/" + QString::number(i+1) + ".png"));
+ }
+
+
+ ui.dwMiniMap->setEnabled(true);
+ ui.dwMiniMap->setWidget(MiniMap);
+
+
+ /*
+ ui.dwImage->setEnabled(false);
+ ui.dwPalette->setEnabled(false);
+ ui.dwTool->setEnabled(false);
+ ui.dwCrosti->setEnabled(false);
+ ui.dwMiniMap->setEnabled(false);
+
+ ui.dwImage->setWindowIcon(QIcon(Info::dataPath()+"/system/image/1.png"));
+ ui.dwPalette->setWindowIcon(QIcon(Info::dataPath()+"/system/image/2.png"));
+ ui.dwTool->setWindowIcon(QIcon(Info::dataPath()+"/system/image/3.png"));
+ ui.dwCrosti->setWindowIcon(QIcon(Info::dataPath()+"/system/image/4.png"));
+ ui.dwMiniMap->setWindowIcon(QIcon(Info::dataPath()+"/system/image/5.png"));
+*/
+ ui.priceBtn->setVisible(false);
+ if(_language=="ru")ui.priceBtn->setVisible(true);
+
+
+
+ imageViewer=new CImageViewer(NULL,this);
+ ui.verticalLayout_3->insertWidget(0,imageViewer);
+
+
+ schemeViewer=new CSchemeViewer(view);
+ ui.verticalLayout_7->insertWidget(0,schemeViewer);
+
+
+ crostiViewer=new CImageViewer(NULL,this);
+ ui.verticalLayout_8->insertWidget(0,crostiViewer);
+
+
+ colorViewer=new CImageViewer(NULL,this);
+ ui.verticalLayout_9->insertWidget(0,colorViewer);
+
+
+
+ ui.rbSType1->setIcon(QIcon(Info::dataPath()+"/system/image/stitch.png"));
+ ui.rbSType2->setIcon(QIcon(Info::dataPath()+"/system/image/lstitch.png"));
+ ui.rbSType3->setIcon(QIcon(Info::dataPath()+"/system/image/rstitch.png"));
+ ui.previewBtn->setIcon(QIcon(Info::dataPath()+"/system/image/eye.png"));
+ ui.imageResetBtn->setIcon(QIcon(Info::dataPath()+"/system/image/imagereset.png"));
+ ui.rotLeftBtn->setIcon(QIcon(Info::dataPath()+"/system/image/rotl.png"));
+ ui.rotRightBtn->setIcon(QIcon(Info::dataPath()+"/system/image/rotr.png"));
+ //ui.scaleResetBtn->setIcon(QIcon(Info::dataPath()+"/system/image/zoomreset.png"));
+ //ui.scaleResetBtn1->setIcon(QIcon(Info::dataPath()+"/system/image/zoomreset.png"));
+ //ui.scaleResetBtn2->setIcon(QIcon(Info::dataPath()+"/system/image/zoomreset.png"));
+ //ui.scaleResetBtn3->setIcon(QIcon(Info::dataPath()+"/system/image/zoomreset.png"));
+ ui.addColorBtn->setIcon(QIcon(Info::dataPath()+"/system/image/plus.png"));
+ ui.removeColorBtn->setIcon(QIcon(Info::dataPath()+"/system/image/minus.png"));
+ ui.schemeBtn->setIcon(QIcon(Info::dataPath()+"/system/image/2.png"));
+ ui.crostiBtn->setIcon(QIcon(Info::dataPath()+"/system/image/4.png"));
+ ui.crostiClearBtn->setIcon(QIcon(Info::dataPath()+"/system/image/clear.png"));
+ ui.priceBtn->setIcon(QIcon(Info::dataPath()+"/system/image/money.png"));
+ ui.chbInvert->setIcon(QIcon(Info::dataPath()+"/system/image/invert.png"));
+ 
+ ui.rbc->setVisible(false);
+
+
+ infoLabel=new QLabel(this);
+ infoLabel->setMinimumWidth(70);
+ infoLabel->setAlignment(Qt::AlignRight);
+ statusBar()->addPermanentWidget(infoLabel);
+ sizeLabel=new QLabel(this);
+ sizeLabel->setMinimumWidth(150);
+ sizeLabel->setAlignment(Qt::AlignRight);
+ statusBar()->addPermanentWidget(sizeLabel);
+
+ wizard=new crostiWizard(&palette, this);
+ connect(wizard,SIGNAL(accepted()),SLOT(wizardAccepted()));
+
+
+ //connect(ui.scaleSB0,SIGNAL(valueChanged(int)),SLOT(setScaleImage(int)));
+ //connect(ui.scaleSB1,SIGNAL(valueChanged(int)),SLOT(setScaleScheme(int)));
+ //connect(ui.scaleSB2,SIGNAL(valueChanged(int)),SLOT(setScaleColorTable(int)));
+ //connect(ui.scaleSB3,SIGNAL(valueChanged(int)),SLOT(setScaleCrosti(int)));
+ connect(ui.squareSB1,SIGNAL(valueChanged(int)),SLOT(crostiSizeShow(int)));
+ 
+ //connect(ui.scaleResetBtn,SIGNAL(clicked()),SLOT(scaleResetBtnPress()));
+ //connect(ui.scaleResetBtn1,SIGNAL(clicked()),SLOT(scaleResetBtn1Press()));
+ //connect(ui.scaleResetBtn2,SIGNAL(clicked()),SLOT(scaleResetBtn2Press()));
+ //connect(ui.scaleResetBtn3,SIGNAL(clicked()),SLOT(scaleResetBtn3Press()));
+ 
+ connect(ui.schemeBtn,SIGNAL(clicked()),SLOT(schemeBtnPress()));
+ connect(ui.colorBtn,SIGNAL(clicked()),SLOT(colorBtnPress()));
+ connect(ui.backColorBtn,SIGNAL(clicked()),SLOT(backColorBtnPress()));
+ connect(ui.previewBtn,SIGNAL(clicked()),SLOT(previewBtnPress()));
+ connect(ui.priceBtn,SIGNAL(clicked()),SLOT(priceBtnPress()));
+ connect(ui.crostiBtn,SIGNAL(clicked()),SLOT(crostiBtnPress()));
+ connect(ui.crostiClearBtn,SIGNAL(clicked()),SLOT(crostiClear()));
+ connect(ui.imageResetBtn,SIGNAL(clicked()),SLOT(imageResetBtnPress()));
+ connect(ui.rotLeftBtn,SIGNAL(clicked()),SLOT(imageRotateLeft()));
+ connect(ui.rotRightBtn,SIGNAL(clicked()),SLOT(imageRotateRight()));
+
+ connect(ui.addColorBtn,SIGNAL(clicked()),SLOT(addColorBtnPress()));
+ connect(ui.removeColorBtn,SIGNAL(clicked()),SLOT(removeColorBtnPress()));
+
+ connect(ui.widthSB,SIGNAL(valueChanged(int)),this,SLOT(uncheckRbx()));
+ connect(ui.heightSB,SIGNAL(valueChanged(int)),this,SLOT(uncheckRbx()));
+
+ connect(ui.squareSB,SIGNAL(valueChanged(int)),SLOT(setSquareSBtoolTip()));
+ connect(ui.squareSB,SIGNAL(valueChanged(int)),SLOT(squareChanged(int)));
+ connect(ui.lineSB,SIGNAL(valueChanged(int)),SLOT(setSquareSBtoolTip()));
+ connect(ui.lineSB,SIGNAL(valueChanged(int)),view,SLOT(setLinePix(int)));
+
+ connect(ui.sbLineWidth,SIGNAL(valueChanged(int)),SLOT(setLine(int)));
+ connect(ui.cbLineMode,SIGNAL(activated(int)),SLOT(setLine(int)));
+
+ connect(ui.rbSType1,SIGNAL(clicked()),view,SLOT(setStitchCross()));
+ connect(ui.rbSType2,SIGNAL(clicked()),view,SLOT(setStitchLeft()));
+ connect(ui.rbSType3,SIGNAL(clicked()),view,SLOT(setStitchRight()));
+
+ connect(ui.chbInvert,SIGNAL(toggled(bool)),view,SLOT(setSpriteIconInvert(bool)));
+ connect(ui.chbGridShow,SIGNAL(toggled(bool)),view,SLOT(setGrid(bool)));
+ connect(ui.chbIconShow,SIGNAL(toggled(bool)),view,SLOT(setIcons(bool)));
+ connect(ui.chbColorShow, SIGNAL(toggled(bool)), view, SLOT(setColors(bool)));
+ connect(ui.tabWidget,SIGNAL(currentChanged(int)),SLOT(updateTab(int)));
+ connect(view,SIGNAL(colorSelected(QPixmap)),ui.lbColor,SLOT(setPixmap(QPixmap)));
+ connect(view,SIGNAL(updated()),SLOT(updateTracking()));
+ connect(view, SIGNAL(updated()), SLOT(updateMiniMap()));
+
+ ui.chbInvert->setChecked(rsettings.value("invertIcons").value<bool>());
+ ui.chbGridShow->setChecked(rsettings.value("showGrid").value<bool>());
+ ui.chbIconShow->setChecked(rsettings.value("showIcons").value<bool>());
+ ui.chbColorShow->setChecked(rsettings.value("showColors").value<bool>());
+ ui.widgetStitch->setVisible(false);
+ ui.widgetGrid->setVisible(false);
+ ui.widgetIcon->setVisible(false);
+ ui.widgetColor->setVisible(false);
+ ui.widgetLine->setVisible(false);
+
+
+ //QPixmap px(20,20);
+ //px.fill(Qt::transparent);
+ //ui.lbColor->setPixmap(px);
+ setLabelColor(ui.lbColor, Qt::transparent);
+
+
+
+ createActions();
+ createMenus();
+
+
+ show();
+
+ QFileInfo fi(fileName);
+ QString suff=fi.suffix().toLower();
+ if(QImageReader::supportedImageFormats().contains(suff.toLatin1()))openImage(fileName);
+ if(suff=="cst")openScheme(fileName);
+
+
+ if((showWizard)&&(fileName==""))wizardDialog();
+
+
+ lbPreview=new previewLabel();
+
+
+ QAbstractButton* btn;
+ QList<QAbstractButton*>btnList=ToolBar::instance()->buttonGroup()->buttons();
+ foreach(btn,btnList){
+   ui.horizontalLayout_6->addWidget(btn);
+   connect(btn,SIGNAL(clicked()),view,SLOT(update()));
+ }
+
+ btn=ToolBar::instance()->buttonGroup()->button(ToolBar::stitchType);
+ connect(btn,SIGNAL(toggled(bool)),ui.widgetStitch,SLOT(setVisible(bool)));
+ btn=ToolBar::instance()->buttonGroup()->button(ToolBar::gridShow);
+ connect(btn,SIGNAL(toggled(bool)),ui.widgetGrid,SLOT(setVisible(bool)));
+ btn=ToolBar::instance()->buttonGroup()->button(ToolBar::iconShow);
+ connect(btn,SIGNAL(toggled(bool)),ui.widgetIcon,SLOT(setVisible(bool)));
+
+ btn=ToolBar::instance()->buttonGroup()->button(ToolBar::colorShow);
+ connect(btn, SIGNAL(toggled(bool)), ui.widgetColor, SLOT(setVisible(bool)));
+
+ btn=ToolBar::instance()->buttonGroup()->button(ToolBar::lineDraw);
+ connect(btn,SIGNAL(toggled(bool)),ui.widgetLine,SLOT(setVisible(bool)));
+ connect(btn,SIGNAL(toggled(bool)),SLOT(setLine(bool)));
+
+ if (palette.color.isEmpty())
+     Info::message(QObject::trUtf8("Color palette not found!"));
+}
+
+
+
+void MainWindow::setLanguage(const QString &lang)
+{
+    _language = lang;
+    uiprogramsettings.lbStatus->setText(Info::message(Info::msgRestart));
+}
+
+
+void MainWindow::setPalette(const QString &name)
+{    
+    QSettings rsettings(QApplication::organizationName(), QApplication::applicationName());
+    rsettings.setValue("palette", name);
+    uiprogramsettings.lbStatus->setText(Info::message(Info::msgRestart));
+}
+
+
+void MainWindow::setLabelColor(QLabel *label, const QColor& cl){
+  QPixmap px(20,20);
+  px.fill(cl);
+  label->setPixmap(px);
+}
+
+
+void MainWindow::updateTracking()
+{
+ _isColorTableUpdated=true;
+ _isSchemeUpdated=true;
+ updateTab(ui.tabWidget->currentIndex());
+}
+
+
+void MainWindow::updateMiniMap()
+{
+    if (ui.tabWidget->currentIndex() == 1 && ui.dwMiniMap->isVisible())
+        MiniMap->updateImage(schemeViewer->image());
+}
+
+
+void MainWindow::setLine(bool b){
+  if(b)setLine();
+  else view->setLine(View::LineMode());
+}
+
+
+void MainWindow::setLine(int){
+  view->setLine(View::LineMode(ui.sbLineWidth->value(),ui.cbLineMode->currentIndex()));
+}
+
+
+
+QImage MainWindow::rotate(QImage image,int angle)const{
+  double a    = M_PI/180*angle;
+  double sina = qSin(a);
+  double cosa = qCos(a);
+  QMatrix rotationMatrix(cosa, sina, -sina, cosa, 0, 0);
+  return image.transformed(rotationMatrix);
+}
+
+void MainWindow::imageRotateLeft(){
+  _angle-=90;
+  imageRotate();
+}
+
+void MainWindow::imageRotateRight(){
+  _angle+=90;
+  imageRotate();
+}
+
+void MainWindow::imageRotate(){
+  if(_angle>180)_angle-=360;
+  if(_angle<-180)_angle+=360;
+  _image=rotate(_imageEtalon,_angle);
+  showImage(_image);
+}
+
+void MainWindow::backColorBtnPress(){
+  view->setColorSelected(_bkColor);
+  view->setIconSelected(INT_MAX);//Если присвоить NO_ICON не будет работать история
+  setLabelColor(ui.lbColor, _bkColor);
+}
+
+void MainWindow::colorBtnPress(){
+ _bkColor=QColorDialog::getColor(Qt::black,this);
+ if(_bkColor.isValid())setBackground(_bkColor);
+}
+
+
+void MainWindow::setBackground(const QColor &cl)
+{
+  view->setBackground(cl);
+  QPixmap pic(16,16);
+  pic.fill(cl);
+  ui.colorBtn->setIcon(QIcon(pic));
+  ui.backColorBtn->setIcon(QIcon(pic));
+}
+
+
+
+void MainWindow::imageResetBtnPress(){
+ _isConverted=false;
+ _image=_imageEtalon;
+ _angle=0;
+ showImage(_image);
+}
+
+
+
+void MainWindow::uncheckRbx(){
+ ui.rbc->setChecked(true);
+}
+
+
+void MainWindow::crostiClear()
+{
+ crostiViewer->scene()->clear();
+ _crostiName.clear();
+}
+
+/*
+void MainWindow::resetCrosti(){
+ crostiScene->clear();
+ crostiScene->setSceneRect(ui.crostiView->rect());
+}
+*/
+void MainWindow::crostiBtnPress()
+{
+    _crostiName.clear();
+ //Не переделывать в рисование на crostiScene - конвертация и масштаб работают медленнее
+ //int squarePix=int(254/ui.squareSB1->value());//Ребро клетки
+  int squarePix=20;
+
+ QSize szI(squarePix*view->schemeSize());
+ float scale=_imageFilter::scaleFit(szI,24);
+ if(!isMemoryAvailable(4*qPow(scale,2)*szI.width()*szI.height())){
+   Info::messageSplash(Info::msgOutOfMemory);
+   return;
+ }
+
+
+
+ QPixmap img(scale*szI);
+ img.fill(_bkColor.rgb());
+ //Рисунок может быть isNull из-за нехватки памяти
+ if(img.isNull()){
+   Info::messageSplash(trUtf8("Cross stitch preview error!"));
+   return;
+ }
+
+
+ QPainter painter(&img);
+ QBrush brush(Qt::SolidPattern);
+ QPen pen(brush,ui.lineSB1->value());//Задание ширины линии
+
+ qreal pScale=scale*squarePix/view->squarePix();
+ painter.scale(pScale,pScale);
+ painter.translate(-view->dx(),-view->dx());
+
+
+ int max=20;
+ int pbdiv=(view->spriteSize()+view->lineSize())/max;
+ progressDialog pb(trUtf8("Making cross stitch"),trUtf8("Cancel"),0,max+1);
+ pb.show();
+
+
+ int offsetLeft=ui.dlSB->value();//Отступ
+ int offsetRight=squarePix-offsetLeft;
+ for(int k=0;k<view->spriteSize();k++){
+   Sprite *sp=view->getSprite(k);
+   if(pen.color()!=sp->color()){
+     pen.setColor(sp->color());
+     painter.setPen(pen);
+   }
+   int x=sp->pos().x();
+   int y=sp->pos().y();
+   switch(sp->stitch()){
+     case Sprite::Cross:{
+         painter.drawLine(x+offsetLeft, y+offsetLeft,  x+offsetRight, y+offsetRight);
+         painter.drawLine(x+offsetLeft, y+offsetRight, x+offsetRight, y+offsetLeft);
+     }break;
+     case Sprite::Left:painter.drawLine(x+offsetLeft, y+offsetLeft,  x+offsetRight, y+offsetRight);break;
+     case Sprite::Right:painter.drawLine(x+offsetLeft, y+offsetRight, x+offsetRight, y+offsetLeft);break;
+   }
+
+   if(k%pbdiv==0)pb.addValue(1);
+   if(pb.wasCanceled())return;
+ }
+
+
+ for(int k=0;k<view->lineSize();k++){
+   Line *ln=view->getLine(k);
+   if((pen.color()!=ln->color())||(pen.width()!=ln->width())){
+     pen.setColor(ln->color());
+     pen.setWidth(ln->width());
+     painter.setPen(pen);
+   }
+
+   painter.drawLine(ln->p1(),ln->p2());
+
+
+   if(k%pbdiv==0)pb.addValue(1);
+   if(pb.wasCanceled())return;
+ }
+
+
+ crostiViewer->setImage(img.toImage());
+
+
+ //ui.tabWidget->setCurrentIndex(3);
+
+ if(scale<1){
+   Info::messageSplash(trUtf8("Image size reduction forced!"));
+   statusBar()->showMessage(trUtf8("If you see a blank cross stitch, try different cross stitch parameters."),3e4);
+ }
+
+ _crostiName=trUtf8("new");
+ setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Cross stitch: ")+_crostiName+"]");
+ crostiSizeShow(ui.squareSB1->value());
+
+ setCurrentTab(3);
+
+}
+
+
+
+
+
+void MainWindow::crostiSizeShow(int val){
+  float mul=1;
+  QString unitName="";
+  switch (_units) {
+  case 0: {
+      mul = float(25.4);
+      unitName = trUtf8("mm");
+  }break;
+  case 1: {
+      mul = 1;
+      unitName = trUtf8("in");
+  }break;
+  }
+
+  float w=mul*view->schemeSize().width()/val;
+  float h=mul*view->schemeSize().height()/val;
+  infoLabel->setText(trUtf8("Cross stitch:"));
+  sizeLabel->setText(QString::number(w,'f',1)+unitName+" x "+QString::number(h,'f',1)+unitName);
+}
+
+
+void MainWindow::schemeSizeShow(){
+  infoLabel->setText(trUtf8("Scheme:"));
+  sizeLabel->setText(QString::number(view->schemeSize().width())+"x"+QString::number(view->schemeSize().height())+"x"+QString::number(colorTable.size()));
+}
+
+
+void MainWindow::imageSizeShow(QImage img){
+  int w=imgW;
+  int h=imgH;
+  QString depth=QString::number(colorTable.size());
+  if(!img.isNull()){
+    w=img.width();
+    h=img.height();
+    depth=QString::number(img.depth())+"b";
+  }
+  infoLabel->setText(trUtf8("Picture:"));
+  sizeLabel->setText(QString::number(w)+"x"+QString::number(h)+"x"+depth);
+}
+
+
+int MainWindow::setSquareSBtoolTip()
+{
+  QImage image(Info::dataPath()+"/system/clpics/clpic0.bmp");
+  int h=image.height()+ui.lineSB->value()+dL+2*dl;
+  ui.squareSB->setToolTip(trUtf8("Set value ")+QString::number(h)+"<br>"+trUtf8("for better design aspect"));
+  return h;
+}
+
+
+bool MainWindow::isMemoryAvailable(qreal msize)
+{
+  bool result=true;
+  //------------------------------------------------------------------------------
+  //Проверка возможности выделения памяти для схемы
+  //------------------------------------------------------------------------------
+  if(msize==0)msize=sizeof(Sprite)*imgW*imgH;
+  void *pt=NULL;
+  pt=malloc(msize);
+  if(pt==NULL){
+    Info::messageSplash(Info::msgOutOfMemory);
+    result=false;
+  }else free(pt);
+  //------------------------------------------------------------------------------
+  //------------------------------------------------------------------------------
+  //------------------------------------------------------------------------------
+  return result;
+}
+
+/*
+void MainWindow::shrinkImageList()
+{
+  QList<QImage>tmpImageList;
+  for(int i=0;i<id.size();i++){
+    int pos=id.at(i);
+    if((pos>NO_ICON)&&(pos<_clpicCount))
+      tmpImageList.append(imageList.at(pos));
+  }
+  imageList.clear();
+  imageList.append(tmpImageList);
+  tmpImageList.clear();
+
+  if(ui.chbInvert->isChecked())
+    for(int i=0;i<imageList.size();i++)imageList[i].invertPixels();
+}
+*/
+
+void MainWindow::schemeFromFile(QString fileName)
+{
+
+ int squarePix=ui.squareSB->value();//Ребро клетки
+ linePix=ui.lineSB->value();
+ int dX=int(1.5*squarePix);//Отступ для нумерации
+
+ if(!isMemoryAvailable()){
+   Info::messageSplash(Info::msgOutOfMemory);
+   return;
+ }
+
+ setParameters(squarePix,linePix,dl);
+
+ int sz=imgW*imgH;
+ int max=20;
+ int pbdiv=sz/max;
+ if(sz<max)pbdiv=1;
+ progressDialog pb(trUtf8("Creating the design"),trUtf8("Cancel"),0,max+1);
+ pb.show();
+
+ view->setParameters(squarePix,imgW,imgH,dX,linePix,dl);
+ view->clear();
+
+ //shrinkImageList();
+
+ int pbcounter=0;
+ QFile file(fileName);
+ if(file.open(QIODevice::ReadOnly|QIODevice::Text)){
+     QTextStream in(&file);
+
+     QString str="";
+     while((str!="#SCHEME CONTENT")&&(!in.atEnd()))str=in.readLine();
+     in.readLine();//Читаем строку параметров схемы
+
+     while(!in.atEnd()){
+
+       str="";
+       while((str.isEmpty())&&(!in.atEnd()))str=in.readLine();
+
+       QStringList strList=str.split(" ");
+       bool isOk=true;
+       if((strList.size()==3)||(strList.size()==4)){
+           int x=strList.at(0).toInt(&isOk);
+           if(!isOk)break;
+           int y=strList.at(1).toInt(&isOk);
+           if(!isOk)break;
+           x=dX+squarePix*x;
+           y=dX+squarePix*y;
+           int index=strList.at(2).toInt(&isOk);
+           if(!isOk)break;
+
+           QColor cl=_bkColor;
+           if(index>=0){
+             if(index<colorTable.size())cl=colorTable.at(index);
+             if(index<_clpicCount)index=id.at(index);
+           }else index=INT_MAX;
+           //Цвет = _bkColor и iconID = INT_MAX определяют цвет фона.
+           view->createSprite(QPoint(x,y),cl,index);
+
+           if(strList.size()==4){
+             int stId=strList.at(3).toInt(&isOk);
+             if(!isOk)break;
+             Sprite::Stitch stitch=static_cast<Sprite::Stitch>(stId);
+             view->getSprite(view->spriteSize()-1)->setStitch(stitch);
+           }
+
+           pbcounter++;
+           if(pbcounter==pbdiv){
+             pb.addValue(1);
+             pbcounter=0;
+           }
+           if(pb.wasCanceled())return;
+         }
+
+         if(strList.size()==6){
+           int x1=strList.at(0).toInt(&isOk);
+           if(!isOk)break;
+           int y1=strList.at(1).toInt(&isOk);
+           if(!isOk)break;
+           int x2=strList.at(2).toInt(&isOk);
+           if(!isOk)break;
+           int y2=strList.at(3).toInt(&isOk);
+           if(!isOk)break;
+           int w=strList.at(4).toInt(&isOk);
+           if(!isOk)break;
+           int index=strList.at(5).toInt(&isOk);
+           if(!isOk)break;
+           QColor cl=Qt::black;
+           if(index<colorTable.size())cl=colorTable.at(index);
+           view->createLine(QPoint(x1,y1),QPoint(x2,y2),cl,w);
+         }
+
+     }
+     file.close();
+ }
+ if(view->spriteSize()==0)Info::messageSplash(trUtf8("Scheme contains no data!"));
+
+}
+
+
+
+void MainWindow::spriteFromImage(QImage image)
+{
+ int squarePix=ui.squareSB->value();//Ребро клетки
+ linePix=ui.lineSB->value();
+ int dX=int(1.5*squarePix);//Отступ для нумерации
+
+ if(!isMemoryAvailable()){
+   Info::messageSplash(Info::msgOutOfMemory);
+   return;
+ }
+
+ setParameters(squarePix,linePix,dl);
+
+ int sz=imgW*imgH;
+ int max=20;
+ int pbdiv=sz/max;
+ if(sz<max)pbdiv=1;
+ progressDialog pb(trUtf8("Creating the design"),trUtf8("Cancel"),0,max+1);
+ pb.show();
+
+//---
+ view->setParameters(squarePix,imgW,imgH,dX,linePix,dl);
+ view->clear();
+
+ QList<int>bkID;
+   //---Создание новой схемы
+   for(int i=0;i<_clpicCount;i++)bkID.append(i);
+
+   //---Случайное перемешивание пиктограмм цветов (для возможного улучшения читаемости)
+   for(int i=0;i<int(bkID.size()/2);i++){
+     int k=int(random(bkID.size()-1));
+     bkID.swap(i,k);
+   }
+
+ if(ui.chbInvert->isChecked())
+   for(int i=0;i<imageList.size();i++)imageList[i].invertPixels();
+
+
+   int pbcounter=0;
+   QList<QRgb>::const_iterator ctit,ctitEnd,ctitBegin;
+   ctitEnd=colorTable.end();
+   ctitBegin=colorTable.begin();
+
+   QMap<int,int> index;
+
+     //Переделываем схему из рисунка
+     for(int i=0;i<image.width();i++){
+       int x=dX+squarePix*i;
+       for(int j=0;j<image.height();j++){
+
+         int y=dX+squarePix*j;
+
+         ctit=qFind(colorTable,image.pixel(i,j));
+
+         if(ctit!=ctitEnd){
+
+           int ik=ctit-ctitBegin;
+           int iconID=ik;
+           if(ik<_clpicCount)iconID=bkID.at(ik);
+
+           index.insert(ik,iconID);
+
+           if(!view->createSprite(QPoint(x,y),*ctit,iconID)){
+             view->clear();
+             Info::messageSplash(Info::msgOutOfMemory);
+             return;
+           }
+
+
+           pbcounter++;
+
+           if(pbcounter==pbdiv){
+             pb.addValue(1);
+
+             pbcounter=0;
+           }
+           if(pb.wasCanceled()){
+             view->clear();
+             return;
+           }
+
+         }
+
+       }
+     }
+
+     id.clear();
+     QMapIterator<int,int>i(index);
+     while(i.hasNext()){
+         i.next();
+         id.append(i.value());
+     }
+
+ _isSchemeUpdated=false;
+}
+
+
+
+void MainWindow::spriteFromView(int square)
+{
+
+ int squarePix=square;//Ребро клетки
+ linePix=ui.lineSB->value();
+ int dX=int(1.5*squarePix);//Отступ для нумерации
+
+ if(!isMemoryAvailable()){
+   Info::messageSplash(Info::msgOutOfMemory);
+   return;
+ }
+
+ setParameters(squarePix,linePix,dl);
+
+ //shrinkImageList();
+
+
+//Переделываем схему загруженную из файла
+ QList<QRgb>::const_iterator ctit,ctitEnd,ctitBegin;
+ ctitEnd=colorTable.end();
+ ctitBegin=colorTable.begin();
+
+ for(int i=0;i<view->spriteSize();i++){
+       Sprite *sp=view->getSprite(i);
+       if(sp!=NULL){
+         int x=dX+int((sp->pos().x()-view->dx())/view->squarePix())*squarePix;
+         int y=dX+int((sp->pos().y()-view->dx())/view->squarePix())*squarePix;
+         sp->setPos(QPoint(x,y));
+
+         ctit=qFind(colorTable,sp->color().rgb());
+         if(ctit!=ctitEnd){
+           int ik=ctit-ctitBegin;
+           if(ik<_clpicCount)ik=id.at(ik);
+           sp->setIconID(ik);
+         }
+       }
+ }
+
+
+ QPoint dx(view->dx(),view->dx());
+ QPoint DX(dX,dX);
+ for(int i=0;i<view->lineSize();i++){
+   Line *ln=view->getLine(i);
+   if(ln!=NULL)
+     ln->setPoints(DX+squarePix*(ln->p1()-dx)/view->squarePix(),DX+squarePix*(ln->p2()-dx)/view->squarePix());
+ }
+
+ view->setParameters(squarePix,imgW,imgH,dX,linePix,dl);
+}
+
+
+void MainWindow::setParameters(int squarePix,int linePix,int dl)
+{
+  QFont font=_mainFontHalf;
+
+  const int FONT_POINT_SIZE_MIN = 6;
+  const int FONT_POINT_SIZE = (squarePix - 2 * dl) / 2;
+
+  font.setPointSize((FONT_POINT_SIZE < FONT_POINT_SIZE_MIN) ?
+                        FONT_POINT_SIZE_MIN :
+                        FONT_POINT_SIZE);
+
+  QBrush brush(Qt::SolidPattern);
+  QPen pen(brush,linePix);
+  if(ui.chbInvert->isChecked())pen.setColor(Qt::white);
+  view->setPen(pen);
+  view->setFont(font);
+
+  imageList.clear();
+  setClPicCount();
+  setImageList(squarePix,dl);
+  view->setClPicCount(_clpicCount);
+  view->setImageList(imageList);
+}
+
+
+void MainWindow::schemeCreate()
+{
+ int squarePix=ui.squareSB->value();//Ребро клетки
+
+ if(view->spriteSize()!=0){
+//---Заполняем таблицу пиктограмм цветов
+   disconnect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+   paletteModel->setRowCount(0);
+   delegate->setSize(squarePix-2*dl,squarePix-2*dl);
+   for(int ik=0;ik<colorTable.size();ik++){
+     int rc=paletteModel->rowCount();
+     paletteModel->insertRows(rc, 1);
+
+     QString text="";
+     for(int k=0;k<palette.color.size();k++){
+       if(palette.color.at(k)._value==colorTable.at(ik)){
+         text=palette.color.at(k)._number+" "+palette.color.at(k)._description;
+         break;
+       }
+     }
+     QModelIndex parent=paletteModel->index(rc,0,QModelIndex());
+     paletteModel->setData(parent,text,Qt::DisplayRole);
+     paletteModel->setData(parent,QColor(colorTable.at(ik)),Qt::DecorationRole);
+     paletteModel->setData(parent,colorTable.at(ik),Qt::UserRole);//Заносим дополнительную информацию о цвете для удобного поиска в schemeModify
+
+     QModelIndex parent1=paletteModel->index(rc,1);
+     if(ik<_clpicCount){
+
+       int ID=NO_ICON;
+       if(ik<id.size())ID=id.at(ik);
+
+       if(ID<imageList.size()){
+         QImage image=imageList.at(ID);
+         if(ui.chbInvert->isChecked())image.invertPixels();
+         paletteModel->setData(parent1,QIcon(QPixmap::fromImage(image)),Qt::DecorationRole);
+       }
+       paletteModel->setData(parent1,ID,Qt::UserRole);//Заносим дополнительную информацию об идентификаторе иконки для использования в createEditor
+
+     }else{
+       text=Info::colorSign(ik);
+       paletteModel->setData(parent1,text,Qt::DisplayRole);
+       paletteModel->setData(parent1,ik,Qt::UserRole);
+     }
+
+   }
+   ui.tvPalette->resizeColumnToContents(0);
+   ui.tvPalette->resizeColumnToContents(1);
+
+   connect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+ //-----------------------------------------------------------------------------
+
+
+
+   schemeViewer->reset();
+
+
+
+   if(ui.chbInvert->isChecked())
+     for(int i=0;i<imageList.size();i++)imageList[i].invertPixels();
+
+
+   _isSchemeCreated=true;
+   schemeSizeShow();
+
+
+   colorTableCreate();
+
+   square=ui.squareSB->value();
+   ui.dwPalette->setEnabled(true);
+   ui.dwTool->setEnabled(true);
+   ui.dwCrosti->setEnabled(true);
+
+
+   //ui.tabWidget->setCurrentIndex(1);
+   setCurrentTab(1);
+ }
+}
+
+
+
+void MainWindow::colorUpdate(int row,QColor color)
+{
+
+  uint errorRow=0;
+  bool isError=false;
+  for(int i=0;i<paletteModel->rowCount();i++){
+    QModelIndex parent=paletteModel->index(i,0,QModelIndex());
+    QRgb cl=paletteModel->data(parent,Qt::UserRole).toUInt();
+    if(cl==color.rgba()){
+      Info::messageSplash(trUtf8("Palette conflict, row %1 cleared.").arg(i+1));
+      errorRow=i;
+      isError=true;
+    }
+  }
+
+
+  disconnect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+
+  QString text="";
+  for(int k=0;k<palette.color.size();k++){
+    if(palette.color.at(k)._value==color.rgba()){
+      text=palette.color.at(k)._number+" "+palette.color.at(k)._description;
+      break;
+    }
+  }
+
+  QModelIndex parent=paletteModel->index(row,0,QModelIndex());
+  paletteModel->setData(parent,text,Qt::DisplayRole);
+  paletteModel->setData(parent,color,Qt::DecorationRole);
+  paletteModel->setData(parent,color.rgba(),Qt::UserRole);//Заносим дополнительную информацию о цвете для удобного поиска в schemeModify
+
+
+  colorTable.replace(row,color.rgba());
+
+
+  if(isError)clearColor(errorRow);
+
+  setColor(row);
+
+  connect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+}
+
+
+
+void MainWindow::iconUpdate(int row,int iid)
+{
+
+  uint errorRow=0;
+  bool isError=false;
+  for(int i=0;i<paletteModel->rowCount();i++){
+    QModelIndex parent=paletteModel->index(i,1,QModelIndex());
+    int id=paletteModel->data(parent,Qt::UserRole).toInt();
+    if(id==iid){
+      Info::messageSplash(trUtf8("Palette conflict, row %1 cleared.").arg(i+1));
+      errorRow=i;
+      isError=true;
+    }
+  }
+
+  disconnect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+
+
+  QModelIndex parent1=paletteModel->index(row,1);
+  if((iid>=0)&&(iid<_clpicCount)){
+    QImage image(Info::dataPath()+"/system/clpics/clpic"+QString::number(iid)+".bmp");
+    image=image.scaled(square-2*dl,square-2*dl);
+    image.setAlphaChannel(image.createMaskFromColor(0xFFFFFFFF,Qt::MaskOutColor));
+
+    if(ui.chbInvert->isChecked())image.invertPixels();
+    paletteModel->setData(parent1,QIcon(QPixmap::fromImage(image)),Qt::DecorationRole);
+    paletteModel->setData(parent1,iid,Qt::UserRole);//Заносим дополнительную информацию об идентификаторе иконки для использования в createEditor
+  }
+
+  if(isError)clearColor(errorRow);
+
+  setColor(row);
+
+  connect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+}
+
+
+void MainWindow::addColorBtnPress()
+{
+  addColor(paletteModel->rowCount(),Qt::transparent);
+}
+
+
+void MainWindow::clearColor(int row)
+{
+  QRgb rgbcl=Qt::transparent;
+  QModelIndex parent=paletteModel->index(row,0,QModelIndex());
+  paletteModel->setData(parent,"",Qt::DisplayRole);
+  paletteModel->setData(parent,QColor(rgbcl),Qt::DecorationRole);
+  paletteModel->setData(parent,rgbcl,Qt::UserRole);
+
+  parent=paletteModel->index(row,1,QModelIndex());
+  paletteModel->setData(parent,NO_ICON,Qt::UserRole);
+  paletteModel->setData(parent,QIcon(),Qt::DecorationRole);
+}
+
+
+void MainWindow::addColor(int row,QRgb rgbcl)
+{
+  disconnect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+  paletteModel->insertRows(row,1);
+
+  colorTable.append(rgbcl);
+  QModelIndex parent=paletteModel->index(row,0,QModelIndex());
+  paletteModel->setData(parent,QColor(rgbcl),Qt::DecorationRole);
+  paletteModel->setData(parent,rgbcl,Qt::UserRole);//Заносим дополнительную информацию о цвете для удобного поиска в schemeModify
+
+
+  QModelIndex parent1=paletteModel->index(row,1);
+
+
+  if(row<_clpicCount){
+    id.append(NO_ICON);
+    paletteModel->setData(parent1,NO_ICON,Qt::UserRole);
+  }else{
+    QString text=Info::colorSign(row);
+    paletteModel->setData(parent1,text,Qt::DisplayRole);
+    paletteModel->setData(parent1,row,Qt::UserRole);
+  }
+
+  sizeLabel->setText(QString::number(imgW)+"x"+QString::number(imgH)+"x"+QString::number(colorTable.size()));
+
+  connect(paletteModel,SIGNAL(itemChanged(QStandardItem*)),this,SLOT(schemeModify(QStandardItem*)));
+}
+
+
+
+void MainWindow::removeColorBtnPress()
+{
+  QModelIndexList mil=ui.tvPalette->selectionModel()->selectedRows();
+
+  for(int i=0;i<mil.size();i++){
+/*
+    QRgb rgbcl=QRgb(paletteModel->data(mil.at(i),Qt::UserRole).toUInt());
+    int row=mil.at(i).row();
+    int count=view->colorCount(rgbcl);
+    if(count==0){
+
+      removeColor(row,rgbcl);
+      setColor(0);
+
+    }else Info::messageSplash(trUtf8("Can't remove -")+
+                             trUtf8(" scheme contains selected color %1 times").arg(count));
+*/
+
+
+    int ret=QMessageBox::question(this,QApplication::applicationName(),
+                                  trUtf8("Delete color from palette (it can not be undone)?"),
+                                    QMessageBox::Yes | QMessageBox::No,
+                                    QMessageBox::No);
+    switch(ret){
+      case QMessageBox::Yes:{
+          QRgb rgbcl=QRgb(paletteModel->data(mil.at(i),Qt::UserRole).toUInt());
+          int row=mil.at(i).row();
+          removeColor(row,rgbcl);
+          setColor(0);
+      }
+      break;
+
+      case QMessageBox::No:
+      break;
+    }
+
+  }
+}
+
+
+void MainWindow::removeColor(int row,QRgb rgbcl){
+    colorTable.removeAt(colorTable.indexOf(rgbcl));
+    id.removeAt(row);
+    paletteModel->removeRow(row);
+
+    view->history.remove(rgbcl);
+    view->swapColorToBackground(rgbcl);
+
+    sizeLabel->setText(QString::number(imgW)+"x"+QString::number(imgH)+"x"+QString::number(colorTable.size()));
+    _isColorTableUpdated=true;
+    if(ui.tabWidget->currentIndex()==2)colorTableCreate(true);
+}
+
+
+void MainWindow::squareChanged(int square)
+{
+ spriteFromView(square);
+ schemeCreate();
+}
+
+
+bool MainWindow::schemeSaveDialog()
+{
+  bool proceed=true;
+  if(_isSchemeUpdated){
+    int ret=QMessageBox::question(this,QApplication::applicationName(),
+                                    trUtf8("Scheme has changed. Save before proceeding?"),
+                                    QMessageBox::Yes | QMessageBox::No
+                                    | QMessageBox::Cancel,
+                                    QMessageBox::Yes);
+    switch(ret){
+      case QMessageBox::Yes:if(saveSchemeDialog()==QDialog::Rejected)proceed=false;
+           break;
+      case QMessageBox::No:
+           break;
+      case QMessageBox::Cancel:proceed=false;
+           break;
+    }
+  }
+  return proceed;
+}
+
+
+
+void MainWindow::paletteOpen(const QString &name)
+{
+    palette.open(name);
+    ui.dwPalette->setWindowTitle(trUtf8("Palette") + ": " + name);
+    ui.dwPalette->setProperty("paletteName",  name);
+}
+
+
+
+void MainWindow::schemeBtnPress()
+{
+  if(schemeSaveDialog()){
+      paletteOpen(ColorPalette::name());
+
+      _schemeData* schemedata=getSchemeData();
+
+      makeScheme(schemedata);
+
+      delete schemedata;
+  }
+
+}
+
+
+void MainWindow::makeScheme(_schemeData *schemedata){
+  if(!schemedata->isNull()){
+
+    colorCount.clear();
+    colorTable.clear();
+    colorTable.append(schemedata->clT());
+
+    crostiViewer->scene()->clear();
+
+    showImage(schemedata->image());
+    //ui.tabWidget->setCurrentIndex(0);
+    setSquareSBtoolTip();
+    _isConverted=true;
+    spriteFromImage(schemedata->image());
+
+//Убираем цвета с нулевым присутствием
+    int ctsize=colorTable.size();
+    int i=0;
+    while(i<colorTable.size()){
+      int count=view->colorCount(colorTable.at(i));
+      if(count==0){
+          colorTable.removeAt(i);
+      }else i++;
+    }
+
+    if(colorTable.size()<ctsize)
+      Info::message(trUtf8("Impossible to convert or find all colors!")+"<br>"+
+                    trUtf8("Palette set to ")+QString::number(colorTable.size())+
+                    trUtf8(" colors."));
+//------------------------------------------------------------------------------
+
+    schemeCreate();
+
+    _schemeName=trUtf8("new");
+    setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Scheme: ")+_schemeName+"]");    
+  }
+}
+
+
+
+
+void MainWindow::updateTab(int index)
+{
+    imageViewer->disconnectViewPortWatcher();
+    schemeViewer->disconnectViewPortWatcher();
+    crostiViewer->disconnectViewPortWatcher();
+    colorViewer->disconnectViewPortWatcher();
+
+
+ QString mod="";
+ if(_isSchemeUpdated)mod="*";
+
+ switch(index){
+   case 0:{if(_isConverted)imageSizeShow();else imageSizeShow(_image);
+           if(_imageName!="")setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Picture: ")+_imageName+"]");
+           else setWindowTitle(QApplication::applicationName());
+
+           //if (!_image.isNull()) {
+               MiniMap->setViewPortColor(MiniMapRectColor);
+               imageViewer->updateMiniMap(MiniMap);
+           //}
+
+          }break;
+   case 1:{schemeSizeShow();
+           if(_schemeName!="")setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Scheme: ")+_schemeName+"] "+mod);
+           else setWindowTitle(QApplication::applicationName());
+
+           //if (_isSchemeCreated) {
+               MiniMap->setViewPortColor(MiniMapRectColor);
+               schemeViewer->updateMiniMap(MiniMap);
+           //}
+
+          }break;
+   case 2:{
+            if(_schemeName!="")
+              setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Scheme: ")+_schemeName+"] "+mod);
+            else setWindowTitle(QApplication::applicationName());
+
+            if(_isColorTableUpdated){
+              colorTableCreate(true);
+              _isColorTableUpdated=false;
+            }
+
+            infoLabel->setText(trUtf8("Palette:"));
+            sizeLabel->setText(ui.dwPalette->property("paletteName").toString() + ", " + QString::number(colorTable.size()));
+
+            //if (_isSchemeCreated) {
+                MiniMap->setViewPortColor(Qt::black);
+                colorViewer->updateMiniMap(MiniMap);
+            //}
+
+          }break;
+   case 3:{crostiSizeShow(ui.squareSB1->value());
+           if(!_crostiName.isEmpty())setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Cross stitch: ")+_crostiName+"]");
+           else setWindowTitle(QApplication::applicationName());
+
+           //if (!_crostiName.isEmpty()) {
+               MiniMap->setViewPortColor(View::invertColor(_bkColor));
+               crostiViewer->updateMiniMap(MiniMap);
+           //}
+
+          }break;
+ }
+}
+
+
+void MainWindow::colorTableCreate(bool update)
+{
+ int clWtext=300; //Длина текстового блока
+ int clWtextSign=20; //Длина текстового блока обозначения цвета
+ int clWcolor=30; //Длина цветового блока
+ int clH=30;      //Высота строк
+ int spacing=10;  //Расстояние между строками и блоками
+ int spacing1=50; //Расстояние между столбцами
+ int headerH = clH + spacing;
+
+
+ int squarePix=ui.squareSB->value();
+
+ clWcolor=2*squarePix;
+ if(squarePix>clH)clH=squarePix;
+ 
+ linePix=ui.lineSB->value();
+ lineBoldPix=linePix+dL;
+
+
+ 
+ int height=(int(colorTable.size()/2)+colorTable.size()%2)*(clH+spacing)+spacing + headerH;
+ QPixmap pix(2*(clWtext+clWcolor)+4*spacing+spacing1,height);
+ pix.fill(Qt::white);
+
+ QPainter painter;
+ painter.begin(&pix);
+
+ painter.setPen(Qt::black);
+
+    painter.setFont(_mainFontBold);
+    painter.drawText(spacing, painter.fontMetrics().height(),
+                     ui.dwPalette->property("paletteName").toString() + ", " +
+                     QString::number(colorTable.size()));
+
+ painter.setFont(_mainFont);
+
+ for(int i=0;i<colorTable.size();i++){
+   QImage image,imageI;
+   QString text,textSign;
+   
+   if(_isSchemeCreated){
+     if(i<_clpicCount){
+       if(!update){
+         //if(i<imageList.size())image=imageList.at(i);
+           if((i<id.size())&&(id.at(i)<imageList.size()))image=imageList.at(id.at(i));
+       }else{
+         image.load(Info::dataPath()+"/system/clpics/clpic"+QString::number(id.at(i))+".bmp");
+         image=image.scaled(squarePix-2*dl,squarePix-2*dl);
+         image.setAlphaChannel(image.createMaskFromColor(0xFFFFFFFF,Qt::MaskOutColor));
+       }
+       imageI=image;
+       if(ui.chbInvert->isChecked())imageI.invertPixels();
+     }else textSign=Info::colorSign(i);
+   }
+   
+   QPixmap pixmap(clWcolor,clH);
+   pixmap.fill(colorTable.at(i));
+
+   int count=view->colorCount(colorTable.at(i));
+   
+   
+   
+   for(int k=0;k<palette.color.size();k++){
+     if(palette.color.at(k)._value==colorTable.at(i)){
+       text=": "+palette.color.at(k)._number+" "+palette.color.at(k)._description;
+       break;
+     }
+   }
+
+   text+=" ("+QString::number(count)+")";
+   
+   
+   int dx=0;
+   if(image.width()>clWtextSign)dx=image.width();
+   else dx=clWtextSign;
+     
+   if(i<colorTable.size()/2+colorTable.size()%2){
+     painter.drawPixmap(2*spacing+dx,spacing+i*(spacing+clH) + headerH, pixmap);
+     
+     if(i<_clpicCount){
+       painter.drawImage(spacing, spacing+i*(spacing+clH) +  headerH, image);
+       painter.drawImage(2*spacing+dx+dl,spacing+i*(spacing+clH)+dl + headerH,imageI);
+     }else{
+       painter.drawText(QRect(spacing,spacing+i*(spacing+clH) + headerH,clWtextSign,clH),Qt::AlignLeft,textSign);
+       if(ui.chbInvert->isChecked())painter.setPen(Qt::white);
+       painter.drawText(QRect(2*spacing+dx,spacing+i*(spacing+clH) + headerH,clWtextSign,clH),Qt::AlignLeft,textSign);
+     }
+     painter.setPen(Qt::black);
+     painter.drawText(QRect(3*spacing+dx+clWcolor,spacing+i*(spacing+clH) + headerH,clWtext+clWtextSign-image.width(),clH),Qt::AlignLeft,text);
+   }else{
+     painter.drawPixmap(spacing1+3*spacing+dx+clWtext+clWcolor,spacing+int(i-colorTable.size()/2-colorTable.size()%2)*(spacing+clH) + headerH, pixmap);
+     
+     if(i<_clpicCount){
+       painter.drawImage(spacing1+2*spacing+clWtext+clWcolor,spacing+int(i-colorTable.size()/2-colorTable.size()%2)*(spacing+clH) + headerH, image);
+       painter.drawImage(spacing1+3*spacing+dx+clWtext+clWcolor+dl,spacing+int(i-colorTable.size()/2-colorTable.size()%2)*(spacing+clH)+dl + headerH, imageI);
+     }else{
+       painter.drawText(QRect(spacing1+2*spacing+clWtext+clWcolor,spacing+int(i-colorTable.size()/2-colorTable.size()%2)*(spacing+clH) + headerH, clWtext,clH),Qt::AlignLeft,textSign);
+       if(ui.chbInvert->isChecked())painter.setPen(Qt::white);
+       painter.drawText(QRect(spacing1+3*spacing+dx+clWtext+clWcolor,spacing+int(i-colorTable.size()/2-colorTable.size()%2)*(spacing+clH) + headerH, clWtext,clH),Qt::AlignLeft,textSign);
+     }
+     painter.setPen(Qt::black);
+     painter.drawText(QRect(spacing1+4*spacing+dx+clWtext+2*clWcolor,spacing+int(i-colorTable.size()/2-colorTable.size()%2)*(spacing+clH) + headerH, clWtext-image.width(),clH),Qt::AlignLeft,text);
+   }
+ }
+
+ painter.end();
+
+
+ colorViewer->setImage(pix.toImage());
+
+}
+
+
+
+
+
+_schemeData* MainWindow::getSchemeData()
+{
+ Qt::AspectRatioMode aspectRatio=Qt::IgnoreAspectRatio;
+ if(ui.aspectChb->isChecked())aspectRatio=Qt::KeepAspectRatioByExpanding;
+
+ QImage image=_image;
+ QSize sz=_image.size();
+
+ if(ui.rbc->isChecked())sz=QSize(ui.widthSB->value(),ui.heightSB->value());
+ if(ui.rbx14->isChecked())sz=QSize(_image.width()/4,_image.height()/4);
+ if(ui.rbx12->isChecked())sz=QSize(_image.width()/2,_image.height()/2);
+ if(ui.rbx2->isChecked())sz=QSize(_image.width()*2,_image.height()*2);
+ if(ui.rbx4->isChecked())sz=QSize(_image.width()*4,_image.height()*4);
+
+ image=_image.scaled(sz,aspectRatio,Qt::SmoothTransformation);
+
+ _schemeData* schemedata=new _schemeData(image);
+
+ schemedata->convert(palette,ui.colorSB->value(),ui.filterCb->currentIndex());
+
+ return schemedata;
+}
+
+
+/*
+QPixmap MainWindow::renderPixmap(QGraphicsScene *scene)
+{
+ QRectF sceneRect(scene->itemsBoundingRect());
+ QPixmap pix(int(sceneRect.width()),int(sceneRect.height()));
+ QPainter painter(&pix);
+ scene->render(&painter);
+ return pix;
+}
+*/
+
+
+void MainWindow::preview()
+{
+  statusBar()->showMessage(Info::message(Info::msgPleaseWait));
+  QImage image;
+  switch(ui.tabWidget->currentIndex()){
+    case 0://image=renderPixmap(imageScene).toImage();break;
+      image=imageViewer->image();break;
+    case 1:image=view->toImage(true);break;
+    case 2://image=renderPixmap(colorScene).toImage();break;
+      image=colorViewer->image();break;
+    case 3://image=renderPixmap(crostiScene).toImage();break;
+      image=crostiViewer->image();break;
+  }
+  QSize size=image.size()*scaleToDesktop(image.size());
+  image=image.scaled(size,Qt::KeepAspectRatio,Qt::SmoothTransformation);
+  lbPreview->showImage(image);
+  statusBar()->clearMessage();
+}
+
+
+
+void MainWindow::previewBtnPress()
+{
+  _schemeData* schemedata=getSchemeData();
+
+  CImageViewer *viewWindow=new CImageViewer(schemedata);
+  viewWindow->setWindowIcon(QIcon(Info::dataPath()+"/system/image/eye.png"));
+  connect(viewWindow,SIGNAL(makeScheme(_schemeData*)),this,SLOT(makeScheme(_schemeData*)));
+
+  QImage img = viewWindow->image();
+  int h = img.height();
+  int w = img.width();  
+  viewWindow->setWindowTitle(trUtf8("Preview - [") +
+                             QString::number(w) + "x" +
+                             QString::number(h) + "x" +
+                             QString::number(img.colorCount()) + " " +
+                             ui.filterCb->currentText() + "]");
+
+  if (h < 300) h = 300;
+  if (w < 300) w = 300;
+
+  if (h > 450) h = 450;
+  if (w > 450) w = 450;
+
+  viewWindow->setGeometry(40,80,w+40,h+90);
+  viewWindow->show();
+}
+
+
+void MainWindow::setMiniMapRectColor()
+{
+    QColor color = QColorDialog::getColor(MiniMapRectColor, this);
+    if (color.isValid()) {
+        MiniMapRectColor = color;
+
+        QSettings settings(QApplication::organizationName(),QApplication::applicationName());
+        settings.setValue("miniMapRectColor", MiniMapRectColor);
+
+        setLabelColor(uiprogramsettings.lbMiniMapRect, MiniMapRectColor);
+    }
+    programsettingsWindow->raise();
+    uiprogramsettings.lbStatus->setText(Info::message(Info::msgRestart));
+}
+
+
+void MainWindow::setMainFont(){
+ bool ok;
+ _mainFont=QFontDialog::getFont(&ok,_mainFont,this);
+ if(ok){
+     if (_mainFont.pointSize() > 24)
+         _mainFont.setPointSize(24);
+
+   QSettings settings(QApplication::organizationName(),QApplication::applicationName());
+   settings.setValue("font/mainfont",_mainFont);
+   QStringList mflist=_mainFont.toString().split(",",QString::SkipEmptyParts);
+   uiprogramsettings.lbMainFontInfo->setText(trUtf8(" Font: ")+mflist.at(0)+trUtf8(" Size: ")+mflist.at(1));
+ }
+ programsettingsWindow->raise();
+ uiprogramsettings.lbStatus->setText(Info::message(Info::msgRestart));
+}
+
+
+
+void MainWindow::setTheme(QString name)
+{
+ QSettings rsettings(QApplication::organizationName(), QApplication::applicationName());
+ rsettings.setValue("theme", name);
+ uiprogramsettings.lbStatus->setText(Info::message(Info::msgRestart));
+}
+
+
+
+void MainWindow::viewProgramSettings()
+{
+ if (programsettingsWindow != NULL)
+     delete programsettingsWindow;
+
+ programsettingsWindow=new QDialog();
+ programsettingsWindow->setWindowFlags(Qt::Dialog|Qt::MSWindowsFixedSizeDialogHint);
+ 
+ uiprogramsettings.setupUi(programsettingsWindow);
+
+ programsettingsWindow->setFont(_mainFont);
+ programsettingsWindow->setWindowIcon(QIcon(Info::dataPath()+"/system/image/settings.png"));
+ programsettingsWindow->setWindowTitle(QApplication::applicationName()+" - "+trUtf8("Settings"));
+ programsettingsWindow->setStyleSheet(Theme::currentTheme().widgetStyle());
+
+ uiprogramsettings.cbStyle->insertItems(0, QStyleFactory::keys());
+ uiprogramsettings.cbUnits->setCurrentIndex(_units);
+ connect(uiprogramsettings.cbUnits,SIGNAL(activated(int)),SLOT(setUnits(int)));
+ uiprogramsettings.cbUnits->setMinimumContentsLength(6);
+ uiprogramsettings.cbUnits->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+
+ uiprogramsettings.cbStyle->setMinimumContentsLength(6);
+ uiprogramsettings.cbStyle->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+
+ uiprogramsettings.cbTheme->setMinimumContentsLength(6);
+ uiprogramsettings.cbTheme->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+ QDir dir(Info::dataPath()+"/system/theme");
+ if(dir.exists()){
+   QStringList list=dir.entryList(QDir::Dirs);
+   QStringList list1;
+   list1<<"default";
+   for(int i=0;i<list.size();i++){
+     QString name=list.at(i);
+     if((name!=".")&&(name!="..")&&(name!="default"))list1<<name;
+   }
+   uiprogramsettings.cbTheme->addItems(list1);
+ }
+
+
+ uiprogramsettings.cbLanguage->setMinimumContentsLength(6);
+ uiprogramsettings.cbLanguage->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+ dir.setPath(Info::dataPath()+"/system/translations");
+ if(dir.exists()){
+   QStringList list=dir.entryList(QDir::Files);
+   uiprogramsettings.cbLanguage->addItem("en");
+   for(int i=0;i<list.size();i++)
+     if((list.at(i).contains("crosti_")&&(list.at(i).contains(".qm")))){
+         QString lang=list.at(i).mid(7);
+         lang.chop(3);
+         uiprogramsettings.cbLanguage->addItem(lang);
+         if(lang==_language)uiprogramsettings.cbLanguage->setCurrentIndex(uiprogramsettings.cbLanguage->count()-1);
+     }
+ }
+ connect(uiprogramsettings.cbLanguage,SIGNAL(activated(QString)),SLOT(setLanguage(QString)));
+
+
+
+    uiprogramsettings.cbPalette->setMinimumContentsLength(6);
+    uiprogramsettings.cbPalette->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    dir.setPath(Info::dataPath()+"/system/palette");
+    if(dir.exists()){
+        QStringList list = dir.entryList(QDir::Files);
+        foreach (QString name, list) {
+            QString paletteName(name);
+            paletteName.chop(4);
+            uiprogramsettings.cbPalette->addItem(paletteName);
+            if (paletteName == ColorPalette::name())
+                uiprogramsettings.cbPalette->setCurrentIndex(uiprogramsettings.cbPalette->count()-1);
+        }
+    }
+    connect(uiprogramsettings.cbPalette, SIGNAL(activated(QString)), SLOT(setPalette(QString)));
+
+
+
+ QStringList mflist=_mainFont.toString().split(",", QString::SkipEmptyParts);
+ uiprogramsettings.lbMainFontInfo->setText(trUtf8(" Font: ")+mflist.at(0)+trUtf8(" Size: ")+mflist.at(1));
+ connect(uiprogramsettings.btnMainFont, SIGNAL(clicked()),SLOT(setMainFont()));
+
+ setLabelColor(uiprogramsettings.lbMiniMapRect, MiniMapRectColor);
+ connect(uiprogramsettings.btnMiniMapRect, SIGNAL(clicked()), SLOT(setMiniMapRectColor()));
+
+ uiprogramsettings.cbTheme->setCurrentIndex(uiprogramsettings.cbTheme->findText(Theme::currentTheme().name(),Qt::MatchExactly));
+ connect(uiprogramsettings.cbTheme,SIGNAL(activated(QString)),SLOT(setTheme(QString)));
+
+
+ QSettings rsettings(QApplication::organizationName(), QApplication::applicationName());
+ QString style = rsettings.value("style").value<QString>();
+ uiprogramsettings.cbStyle->setCurrentIndex(uiprogramsettings.cbStyle->findText(style));
+ connect(uiprogramsettings.cbStyle, SIGNAL(activated(QString)), SLOT(setStyle(QString)));
+
+ programsettingsWindow->show();
+}
+
+
+
+
+void MainWindow::printCrosti(QPrinter *printer)
+{
+ if(!printer->isValid()){
+   Info::messageSplash(Info::msgPrinterNotFound);
+   return;
+ }
+ int w=printer->pageRect().width();
+ int h=printer->pageRect().height();
+ if(!w || !h){
+   Info::messageSplash(Info::msgPrintAreaError);
+   return;
+ }
+
+ QPainter p;
+ 
+ if(!p.begin(printer)){
+   Info::messageSplash(Info::msgPrinterError);
+   return;
+ }
+
+ //crostiScene->render(&p);
+ crostiViewer->scene()->render(&p);
+ p.end();
+}
+
+
+
+void MainWindow::printImage(QPrinter *printer)
+{
+ if(!printer->isValid()){
+   Info::messageSplash(Info::msgPrinterNotFound);
+   return;
+ }
+ int w=printer->pageRect().width();
+ int h=printer->pageRect().height();
+ if(!w || !h){
+   Info::messageSplash(Info::msgPrintAreaError);
+   return;
+ }
+
+ QPainter p;
+ if(!p.begin(printer)){
+   Info::messageSplash(Info::msgPrinterError);
+   return;
+ }
+
+
+ //imageScene->render(&p);
+ imageViewer->scene()->render(&p);
+ p.end();
+ _picturePath=QFileInfo(printer->outputFileName()).canonicalPath();
+}
+
+
+void MainWindow::printScheme(QPrinter *printer)
+{
+
+ if(!printer->isValid()){
+   Info::messageSplash(Info::msgPrinterNotFound);
+   return;
+ }
+
+ int pix=int(view->squarePix()*view->scale());//Масштабированный размер спрайта (в пикселах)
+ int w=printer->pageRect().width()-2*view->dx();
+ int h=printer->pageRect().height()-2*view->dx();
+ if((w<=0)||(h<=0)){
+   Info::messageSplash(Info::msgPrintAreaError);
+   return;
+ }
+
+ int countW=w;
+ int countH=h;
+ if(pix>0){
+  countW/=pix;//Количество спрайтов умещающихся в ширине страницы принтера
+  countH/=pix;//Количество спрайтов умещающихся в высоте страницы принтера
+ }
+
+
+ QSize sz=view->schemeSize()*pix;
+ float scaleW=sz.width()/w;
+ float scaleH=sz.height()/h;
+
+ qreal msize=(countW+1)*(countH+1)*qPow(view->squarePix()*view->scale(),2)*4;//Размер картинки в байтах
+
+
+ QPainter p;
+ if(!p.begin(printer)){
+   Info::messageSplash(Info::msgPrinterError);
+   return;
+ }
+
+ //---Это усложнение нужно чтобы исключить создание пустых страниц, если sz.width()%w малое число.
+ int modw=sz.width()%w;
+ int modh=sz.height()%h;
+ if(modw>2*view->dx())modw=scaleW+1;else modw=scaleW;
+ if(modh>2*view->dx())modh=scaleH+1;else modh=scaleH;
+ //-----------------------------------------------------------------------------
+ int sz1=modw*modh;
+ int counter=0;
+ QString msg=trUtf8("Scheme is preparing for print. Please, wait...");
+ statusBar()->showMessage(msg);
+
+ for(int j=0;j<modw;j++){
+   for(int i=0;i<modh;i++){
+     if(!isMemoryAvailable(msize)){
+       p.end();
+       statusBar()->showMessage(msg+" "+QString::number(counter+1)+"/"+QString::number(sz1),1e5);
+       Info::messageSplash(Info::msgOutOfMemory);
+       return;
+     }
+     counter++;
+     p.drawImage(QPoint(0,0),view->toImage(QRect(j*countW,i*countH,countW+1,countH+1)));
+     if(i<modh-1)printer->newPage();
+   }
+   if(j<modw-1)printer->newPage();
+   statusBar()->showMessage(msg+" "+QString::number(counter)+"/"+QString::number(sz1),1e5);
+ }
+ p.end();
+ statusBar()->showMessage("");
+}
+
+
+
+void MainWindow::printColorTable(QPrinter *printer)
+{
+ if(!printer->isValid()){
+   Info::messageSplash(Info::msgPrinterNotFound);
+   return;
+ }
+
+ int w=printer->pageRect().width();
+ int h=printer->pageRect().height();
+ if(!w || !h){
+   Info::messageSplash(Info::msgPrintAreaError);
+   return;
+ }
+
+ QPainter p;
+ 
+ if(!p.begin(printer)){
+   Info::messageSplash(Info::msgPrinterError);
+   return;
+ }
+
+
+ //colorScene->render(&p);
+ colorViewer->scene()->render(&p);
+ p.end();
+}
+
+
+
+void MainWindow::printDialog()
+{
+ QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+ QPrinter printer(QPrinter::ScreenResolution);
+
+ if(!rsettings.contains("printer"))
+   rsettings.setValue("printer",printer.printerName());
+ else printer.setPrinterName(rsettings.value("printer").value<QString>());
+
+ QPrintPreviewDialog *printPreview=new QPrintPreviewDialog(&printer);
+ printPreview->setAttribute(Qt::WA_DeleteOnClose);
+ printPreview->setWindowIcon(QIcon(Info::dataPath()+"/system/image/crosti.png"));
+ 
+ 
+ switch(ui.tabWidget->currentIndex()){
+   case 0:{
+     printPreview->setWindowTitle(trUtf8("Preview picture"));
+     connect(printPreview,SIGNAL(paintRequested(QPrinter*)),SLOT(printImage(QPrinter*)));
+   }break;
+   case 1:{
+     printPreview->setWindowTitle(trUtf8("Preview - [Scheme: ")+_schemeName+"]");
+     connect(printPreview,SIGNAL(paintRequested(QPrinter*)),SLOT(printScheme(QPrinter*)));
+   }break;
+   case 2:{
+     printPreview->setWindowTitle(trUtf8("Preview - [Palette: ")+_schemeName+"]");
+     connect(printPreview,SIGNAL(paintRequested(QPrinter*)),SLOT(printColorTable(QPrinter*)));
+   }break;
+   case 3:{
+     printPreview->setWindowTitle(trUtf8("Preview cross stitch"));
+     connect(printPreview,SIGNAL(paintRequested(QPrinter*)),SLOT(printCrosti(QPrinter*)));
+   }break;
+ }
+ 
+ if(printPreview->exec()==QDialog::Accepted)rsettings.setValue("printer",printer.printerName());
+}
+
+/*
+void MainWindow::wheelEvent(QWheelEvent *e)
+{
+  if(e->modifiers().testFlag(Qt::ControlModifier)){
+    //e->delta() = +/- 120 см. мануал
+    const char div=12;
+    QSpinBox* sb=findChild<QSpinBox*>("scaleSB"+QString::number(ui.tabWidget->currentIndex()));
+    if(sb!=NULL)sb->stepBy(int(e->delta()/div));
+  }else{
+    //wheelEvent(event);
+  }
+}
+*/
+
+
+void MainWindow::closeEvent(QCloseEvent *e)
+{
+  /*
+ if(_isSchemeUpdated){
+   int ret=QMessageBox::question(this,QApplication::applicationName(),
+                                   trUtf8("Scheme has changed. Save before exit?"),
+                                   QMessageBox::Yes | QMessageBox::No
+                                   | QMessageBox::Cancel,
+                                   QMessageBox::Yes);
+   switch(ret){
+     case QMessageBox::Yes:{
+       if(saveSchemeDialog()==QDialog::Rejected){
+         e->ignore();
+         return;
+       }
+     }
+     break;
+
+     case QMessageBox::No:
+     break;
+
+     case QMessageBox::Cancel:{
+       e->ignore();
+       return;
+     }
+     break;
+
+   }
+
+ }
+*/
+  if(!schemeSaveDialog()){
+      e->ignore();
+      return;
+    }
+
+ QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+
+ rsettings.setValue("language",_language);
+
+ rsettings.setValue("invertIcons",ui.chbInvert->isChecked());
+ rsettings.setValue("showGrid",ui.chbGridShow->isChecked());
+ rsettings.setValue("showIcons",ui.chbIconShow->isChecked());
+ rsettings.setValue("showColors", ui.chbColorShow->isChecked());
+
+
+ if(programsettingsWindow!=NULL){
+   rsettings.setValue("theme",uiprogramsettings.cbTheme->currentText());
+ }
+
+
+ rsettings.setValue("schemeFilter", ui.filterCb->currentIndex());
+ rsettings.setValue("schemeSquare",ui.squareSB->value());
+ rsettings.setValue("crostiSquare",ui.squareSB1->value());
+ rsettings.setValue("schemeLine",ui.lineSB->value());
+ rsettings.setValue("toolLine",ui.sbLineWidth->value());
+ rsettings.setValue("toolLineMode",ui.cbLineMode->currentIndex());
+ rsettings.setValue("crostiLine",ui.lineSB1->value());
+ rsettings.setValue("crostiDl",ui.dlSB->value());
+ rsettings.setValue("crostiColor",_bkColor);
+ rsettings.setValue("picturePath",_picturePath);
+ rsettings.setValue("schemePath",_schemePath);
+
+ rsettings.setValue("windowGeometry",saveGeometry());
+ rsettings.setValue("windowState",saveState());
+
+ e->accept();
+ qApp->quit();
+}
+
+
+void MainWindow::wizardDialog()
+{
+ wizard->restart();
+ wizard->show();
+}
+
+void MainWindow::wizardAccepted()
+{
+ colorTable.clear();
+ colorCount.clear();
+ colorTable<<wizard->colorTable;
+ colorCount<<wizard->colorCount;
+ _isConverted=true;
+ _image=wizard->imageOriginal();
+ _imageEtalon=_image;
+ showImage(wizard->image());
+ schemeBtnPress();
+
+ QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+ _picturePath=rsettings.value("picturePath").value<QString>();
+
+ ui.dwImage->setEnabled(true);
+}
+
+
+void MainWindow::createActions()
+{
+
+ openActionGroup=new QActionGroup(this);
+ QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+ QString recentFiles=rsettings.value("recentFiles").value<QString>();
+ QStringList recentFile=recentFiles.split(";",QString::SkipEmptyParts);
+ for(int i=0;i<recentFile.size();i++){
+   QFileInfo fi(recentFile.at(i));
+   QAction *openAct=new QAction(QString::number(i+1)+" "+fi.fileName(),this);
+   openAct->setData(fi.absoluteFilePath());
+   openAct->setStatusTip(trUtf8("Open file: ")+fi.absoluteFilePath());
+   openAct->setShortcut(tr("Alt+")+QString::number(i+1));
+   openActionGroup->addAction(openAct);
+ }
+ connect(openActionGroup,SIGNAL(triggered(QAction*)),SLOT(openFile(QAction*)));
+
+
+
+ windowActionGroup=new QActionGroup(this);
+
+
+ for(int i=0;i<ui.tabWidget->count();i++){
+   QAction *windowAct=new QAction(ui.tabWidget->tabText(i),this);
+   windowAct->setStatusTip(trUtf8("Jump to: ")+ui.tabWidget->tabText(i));
+   windowAct->setIcon(QIcon(Info::dataPath()+"/system/image/"+QString::number(i+1)+".png"));
+   windowAct->setData(i);
+   windowAct->setShortcut(tr("Ctrl+")+QString::number(i+1));
+   windowActionGroup->addAction(windowAct);
+ }
+ connect(windowActionGroup,SIGNAL(triggered(QAction*)),SLOT(openTab(QAction*)));
+
+ previewAct=new QAction(QIcon(Info::dataPath()+"/system/image/preview.png"),trUtf8("Preview..."),this);
+ previewAct->setShortcut(tr("Ctrl+F"));
+ connect(previewAct,SIGNAL(triggered()),SLOT(preview()));
+
+ wizardAct=new QAction(trUtf8("Wizard..."),this);
+ wizardAct->setShortcut(tr("Ctrl+W"));
+
+ wizardAct->setIcon(QIcon(Info::dataPath()+"/system/image/wizard.png"));
+ connect(wizardAct,SIGNAL(triggered()),this,SLOT(wizardDialog()));
+
+ openAct=new QAction(trUtf8("Open..."),this);
+ openAct->setShortcut(tr("Ctrl+O"));
+ openAct->setIcon(QIcon(Info::dataPath()+"/system/image/imageopen.png"));
+ connect(openAct,SIGNAL(triggered()),this,SLOT(openDialog()));
+
+ exportAct=new QAction(trUtf8("Export..."),this);
+ exportAct->setShortcut(tr("Ctrl+E"));
+ exportAct->setIcon(QIcon(Info::dataPath()+"/system/image/export.png"));
+ connect(exportAct,SIGNAL(triggered()),this,SLOT(exportDialog()));
+
+ saveAct=new QAction(trUtf8("Save"),this);
+ saveAct->setShortcut(tr("Ctrl+S"));
+ saveAct->setIcon(QIcon(Info::dataPath()+"/system/image/imagesave.png"));
+ connect(saveAct,SIGNAL(triggered()),this,SLOT(saveDialog()));
+
+
+ printAct=new QAction(trUtf8("Print..."),this);
+ printAct->setShortcut(tr("Ctrl+P"));
+ printAct->setIcon(QIcon(Info::dataPath()+"/system/image/print.png"));
+
+ connect(printAct,SIGNAL(triggered()),this,SLOT(printDialog()));
+
+ undoAct=new QAction(trUtf8("Undo"),this);
+ undoAct->setShortcut(tr("Ctrl+Z"));
+ undoAct->setEnabled(false);
+ undoAct->setIcon(QIcon(Info::dataPath()+"/system/image/undo.png"));
+ connect(undoAct, SIGNAL(triggered()), view, SLOT(undo()));
+ connect(undoAct,SIGNAL(triggered()),SLOT(colorTableCreate()));
+ connect(&view->history,SIGNAL(undoEnable(bool)),undoAct,SLOT(setEnabled(bool)));
+
+ redoAct=new QAction(trUtf8("Redo"),this);
+ redoAct->setShortcut(tr("Shift+Ctrl+Z"));
+ redoAct->setEnabled(false);
+ redoAct->setIcon(QIcon(Info::dataPath()+"/system/image/redo.png"));
+ connect(redoAct, SIGNAL(triggered()), view, SLOT(redo()));
+ connect(redoAct,SIGNAL(triggered()),SLOT(colorTableCreate()));
+ connect(&view->history,SIGNAL(redoEnable(bool)),redoAct,SLOT(setEnabled(bool)));
+
+ dwImageAct=new QAction(trUtf8("Picture"),this);
+ dwImageAct->setShortcut(tr("F5"));
+ dwImageAct->setCheckable(true);
+ dwImageAct->setChecked(ui.dwImage->isVisible());
+ dwImageAct->setIcon(ui.dwImage->windowIcon());
+ connect(dwImageAct,SIGNAL(triggered(bool)),ui.dwImage,SLOT(setVisible(bool)));
+ connect(ui.dwImage,SIGNAL(visibilityChanged(bool)),dwImageAct,SLOT(setChecked(bool)));
+
+ dwCrostiAct=new QAction(trUtf8("Cross stitch"),this);
+ dwCrostiAct->setShortcut(tr("F7"));
+ dwCrostiAct->setCheckable(true);
+ dwCrostiAct->setChecked(ui.dwCrosti->isVisible());
+ dwCrostiAct->setIcon(ui.dwCrosti->windowIcon());
+ connect(dwCrostiAct,SIGNAL(triggered(bool)),ui.dwCrosti,SLOT(setVisible(bool)));
+ connect(ui.dwCrosti,SIGNAL(visibilityChanged(bool)),dwCrostiAct,SLOT(setChecked(bool)));
+ 
+ dwPaletteAct=new QAction(trUtf8("Palette"),this);
+ dwPaletteAct->setShortcut(tr("F6"));
+ dwPaletteAct->setCheckable(true);
+ dwPaletteAct->setChecked(ui.dwPalette->isVisible());
+ dwPaletteAct->setIcon(ui.dwPalette->windowIcon());
+ connect(dwPaletteAct,SIGNAL(triggered(bool)),ui.dwPalette,SLOT(setVisible(bool)));
+ connect(ui.dwPalette,SIGNAL(visibilityChanged(bool)),dwPaletteAct,SLOT(setChecked(bool)));
+ 
+ dwToolAct=new QAction(trUtf8("Tools"),this);
+ dwToolAct->setShortcut(tr("F8"));
+ dwToolAct->setCheckable(true);
+ dwToolAct->setChecked(ui.dwTool->isVisible());
+ dwToolAct->setIcon(ui.dwTool->windowIcon());
+ connect(dwToolAct,SIGNAL(triggered(bool)),ui.dwTool,SLOT(setVisible(bool)));
+ connect(ui.dwTool,SIGNAL(visibilityChanged(bool)),dwToolAct,SLOT(setChecked(bool)));
+
+ dwMiniMapAct=new QAction(trUtf8("Minimap"),this);
+ dwMiniMapAct->setShortcut(tr("F9"));
+ dwMiniMapAct->setCheckable(true);
+ dwMiniMapAct->setChecked(ui.dwMiniMap->isVisible());
+ dwMiniMapAct->setIcon(ui.dwMiniMap->windowIcon());
+ connect(dwMiniMapAct,SIGNAL(triggered(bool)),ui.dwMiniMap,SLOT(setVisible(bool)));
+ connect(ui.dwMiniMap,SIGNAL(visibilityChanged(bool)),dwMiniMapAct,SLOT(setChecked(bool)));
+
+ exitAct = new QAction(trUtf8("Exit"), this);
+ exitAct->setShortcut(tr("Ctrl+Q"));
+ exitAct->setIcon(QIcon(Info::dataPath()+"/system/image/exit.png"));
+ exitAct->setStatusTip(trUtf8("Exit program"));
+ connect(exitAct,SIGNAL(triggered()),SLOT(close()));
+
+
+ Info *out=new Info;
+ aboutAct=new QAction(trUtf8("About..."), this);
+ aboutAct->setIcon(QIcon(Info::dataPath()+"/system/image/crosti.png"));
+ connect(aboutAct,SIGNAL(triggered()),out,SLOT(about()));
+
+ aboutQtAct=new QAction(trUtf8("About Qt..."), this);
+ connect(aboutQtAct,SIGNAL(triggered()),out,SLOT(aboutQt()));
+
+ websiteAct=new QAction(trUtf8("Visit website..."), this);
+ connect(websiteAct,SIGNAL(triggered()),out,SLOT(websiteVisit()));
+
+
+ viewsettingAct= new QAction(trUtf8("Settings..."), this);
+ viewsettingAct->setIcon(QIcon(Info::dataPath()+"/system/image/settings.png"));
+ connect(viewsettingAct, SIGNAL(triggered()), this, SLOT(viewProgramSettings()));
+}
+
+
+void MainWindow::createMenus()
+{
+ menuBar()->setStyleSheet(Theme::currentTheme().menuStyle());
+
+ menuBar()->clear();
+ menuBar()->setFont(_mainFont);
+ fileMenu=menuBar()->addMenu(trUtf8("File"));
+
+ fileMenu->addAction(openAct);
+ fileMenu->addAction(saveAct);
+ fileMenu->addAction(exportAct);
+ fileMenu->addSeparator();
+ fileMenu->addAction(printAct);
+ fileMenu->addSeparator();
+ fileMenu->addAction(wizardAct);
+ fileMenu->addSeparator();
+
+ for(int i=0;i<openActionGroup->actions().size();i++)
+   fileMenu->addAction(openActionGroup->actions()[i]);
+
+ if(openActionGroup->actions().size()>0)fileMenu->addSeparator();
+
+ fileMenu->addAction(exitAct);
+
+
+ viewMenu=menuBar()->addMenu(trUtf8("Edit"));
+ viewMenu->addAction(undoAct);
+ viewMenu->addAction(redoAct);
+
+
+ viewMenu=menuBar()->addMenu(trUtf8("Tools"));
+ viewMenu->addAction(dwImageAct);
+ viewMenu->addAction(dwPaletteAct);
+ viewMenu->addAction(dwCrostiAct);
+ viewMenu->addAction(dwToolAct);
+ viewMenu->addAction(dwMiniMapAct);
+ viewMenu->addSeparator();
+ viewMenu->addAction(viewsettingAct);
+
+
+ viewMenu=menuBar()->addMenu(trUtf8("Window"));
+ for(int i=0;i<windowActionGroup->actions().size();i++)
+   viewMenu->addAction(windowActionGroup->actions()[i]);
+ viewMenu->addSeparator();
+ viewMenu->addAction(previewAct);
+
+
+ helpMenu = menuBar()->addMenu(trUtf8("Help"));
+ helpMenu->addAction(aboutQtAct);
+ helpMenu->addAction(aboutAct);
+ helpMenu->addSeparator();
+ helpMenu->addAction(websiteAct);
+}
+
+
+void MainWindow::showImage(QImage img)
+{
+
+  imageViewer->setImage(img);
+
+
+  //ui.tabWidget->setCurrentIndex(0);
+  imgH=img.height();
+  imgW=img.width();
+
+
+  ui.dwImage->setEnabled(true);
+  ui.widthSB->setValue(img.width());
+  ui.heightSB->setValue(img.height());
+
+  imageSizeShow(img);
+
+
+  setCurrentTab(0);
+}
+
+
+void MainWindow::setCurrentTab(int index)
+{
+    if (ui.tabWidget->currentIndex() == index)
+      updateTab(index);
+    else
+      ui.tabWidget->setCurrentIndex(index);
+}
+
+
+void MainWindow::saveRegistry(QFileInfo fi)
+{
+  const int recentFilesCount=9;
+
+//Добавление открытого файла в реестр
+  QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+  QString recentFiles=rsettings.value("recentFiles").value<QString>();
+  QStringList recentFile=recentFiles.split(";",QString::SkipEmptyParts);
+
+  bool isPresent=false;
+  for(int i=0;i<recentFile.size();i++)
+    if(fi.absoluteFilePath()==recentFile.at(i)){
+      isPresent=true;
+      break;
+    }
+  if(!isPresent)recentFile.append(fi.absoluteFilePath());
+  if(recentFile.size()>recentFilesCount)recentFile.removeFirst();
+
+
+  recentFiles="";
+  for(int i=0;i<recentFile.size();i++)recentFiles+=recentFile.at(i)+";";
+
+  rsettings.setValue("recentFiles",recentFiles);
+//------------------------------------------------------------------------------
+}
+
+
+void MainWindow::openFile(QAction *act)
+{
+ QFileInfo fi(act->data().toString());
+
+ if(fi.suffix()=="cst")
+   if(schemeSaveDialog())openScheme(fi.absoluteFilePath());else return;
+ else
+   openImage(fi.absoluteFilePath());
+}
+
+
+void MainWindow::openTab(QAction *act)
+{
+ //ui.tabWidget->setCurrentIndex(act->data().toInt());
+    setCurrentTab(act->data().toInt());
+}
+
+
+
+
+void MainWindow::openImage(QString fileName)
+{
+ if(_image.load(fileName)){
+
+   if(!_image.isNull()){
+     _imageEtalon=_image;
+     _imageName=fileName;
+     _angle=0;
+
+
+     saveRegistry(QFileInfo(fileName));
+
+     colorCount.clear();
+
+     ui.colorSB->setMaximum(256);
+     setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Picture: ")+_imageName+"]");
+     showImage(_image);
+
+     _isConverted=false;
+     //_isSchemeCreated=false;
+     _picturePath=QFileInfo(fileName).canonicalPath();
+   }else Info::message(trUtf8("The picture has no data %1.").arg(fileName));
+ }else Info::message(trUtf8("Can't open the picture %1.").arg(fileName));
+}
+
+
+
+void MainWindow::openDialog()
+{
+ QStringList filters = QStringList() <<
+                       Info::imageFilter(QImageReader::supportedImageFormats()) <<
+                       trUtf8("Crosti design (*.cst)") <<
+                       trUtf8("Any file (*)");
+
+ QString filter="";
+ QString directory=Info::dataPath();
+ int tabid=ui.tabWidget->currentIndex();
+
+
+ const QString SEP = ";;";
+ if((tabid==1)||(tabid==2)){
+     filter = QString("%2%1%3%1%4").arg(SEP, filters.at(1), filters.at(0), filters.at(2));
+     directory=_schemePath;
+ }else{
+     filter = QString("%2%1%3%1%4").arg(SEP, filters.at(0), filters.at(1), filters.at(2));
+     directory=_picturePath;
+ }
+
+
+ QFileDialog *openDialog=new QFileDialog(this,trUtf8("Open file"),directory,filter);
+ openDialog->setAcceptMode(QFileDialog::AcceptOpen);
+ openDialog->setFileMode(QFileDialog::AnyFile);
+ if(openDialog->exec()){
+      QString fileName=openDialog->selectedFiles().at(0);
+      switch(analyzeSuffix(QFileInfo(fileName).suffix())){
+        //Рисунки
+        case 0:{
+                openImage(fileName);
+                _picturePath=QFileInfo(fileName).canonicalPath();
+               };break;
+        //cst
+        case 1:{
+                openScheme(fileName);
+                _schemePath=QFileInfo(fileName).canonicalPath();
+               };break;
+      }
+ }
+}
+
+
+void MainWindow::saveImageDialog()
+{
+ //if(imageScene->items().size()!=0){
+ if(imageViewer->scene()->items().size()!=0){
+
+   QString filter=Info::imageFilter(QImageWriter::supportedImageFormats())+";;"+trUtf8("Portable document file (*.pdf)");
+   QFileDialog *saveDialog=new QFileDialog(this,trUtf8("Save picture"),_picturePath,filter);
+
+   saveDialog->setAcceptMode(QFileDialog::AcceptSave);
+   saveDialog->setFileMode(QFileDialog::AnyFile);
+   if(saveDialog->exec()){
+     QString fileName=saveDialog->selectedFiles().at(0);
+     checkSuffix(&fileName,saveDialog->selectedNameFilter());
+     switch(analyzeSuffix(QFileInfo(fileName).suffix())){
+       //Рисунки
+       case 0:{
+                //QPixmap pix=renderPixmap(imageScene);
+                //bool saved=pix.save(fileName,0,100);
+                bool saved=imageViewer->image().save(fileName,0,100);
+                if(saved)
+                  openImage(fileName);
+                else
+                  Info::messageSplash(Info::msgImageSaveError);
+              };break;
+
+       //pdf
+       case 2:{
+                QPrinter printerPDF(QPrinter::ScreenResolution);
+                printerPDF.setOutputFormat(QPrinter::PdfFormat);
+                printerPDF.setOutputFileName(fileName);
+                printImage(&printerPDF);
+              };break;
+     }
+   }
+ }else
+   Info::messageSplash(trUtf8("Nothing to save - picture isn't open!"));
+
+}
+
+void MainWindow::saveColorTableDialog()
+{
+ //if(colorScene->items().size()!=0){
+ if(colorViewer->scene()->items().size()!=0){
+   QString fileName=QFileDialog::getSaveFileName(this,trUtf8("Save palette"),_picturePath,Info::imageFilter(QImageWriter::supportedImageFormats()));
+   //QPixmap pix=renderPixmap(colorScene);
+   //bool saved=pix.save(fileName,0,100);
+   bool saved=colorViewer->image().save(fileName,0,100);
+   if(saved)
+     _picturePath=QFileInfo(fileName).canonicalPath();
+   else
+     Info::messageSplash(Info::msgImageSaveError);
+ }else
+   Info::messageSplash(trUtf8("Nothing to save - palette is not set!"));
+}
+
+void MainWindow::saveCrostiDialog()
+{
+ //if(crostiScene->items().size()!=0){
+ if(crostiViewer->scene()->items().size()!=0){
+   QString fileName=QFileDialog::getSaveFileName(this,trUtf8("Save cross stitch"),_picturePath,Info::imageFilter(QImageWriter::supportedImageFormats()));
+
+   //QPixmap pix=renderPixmap(crostiScene);
+   //bool saved=pix.save(fileName,0,100);
+   bool saved=crostiViewer->image().save(fileName,0,100);
+   if(saved){
+     _crostiName=fileName;
+     _picturePath=QFileInfo(fileName).canonicalPath();
+     setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Cross stitch: ")+_crostiName+"]");
+   }else
+     Info::messageSplash(Info::msgImageSaveError);
+
+ }else
+   Info::messageSplash(trUtf8("Nothing to save - cross stitch is not set!"));
+}
+
+
+
+void MainWindow::openScheme(QString fileName)
+{
+ if(!fileName.isEmpty()){
+    square=0;
+    int line=0;
+    bool isOk=true;
+    QString path=fileName;
+    QFile file(path);
+
+
+    if(file.open(QIODevice::ReadOnly|QIODevice::Text)){
+      colorTable.clear();
+      id.clear();
+      QTextStream in(&file);
+      QString initStr=in.readLine();
+      bool colorTableLoad=false;
+
+
+      QRegExp rx("#COLOR TABLE:?\\s*(\\w*)");
+      if (rx.indexIn(initStr, 0) != -1) {
+          colorTableLoad = true;
+          QString paletteName = (rx.cap(1).isEmpty()) ?
+                      "dmc" :
+                      rx.cap(1);
+          paletteOpen(paletteName);
+      } else
+          isOk = false;
+
+
+      if (isOk)
+      while(!in.atEnd()){
+        QString str="";
+
+        while((str.isEmpty())&&(!in.atEnd()))str=in.readLine();
+        
+        if(str=="#SCHEME CONTENT"){
+          str="";
+          while((str.isEmpty())&&(!in.atEnd()))str=in.readLine();
+          colorTableLoad=false;
+          QStringList infoList=str.split(" ",QString::SkipEmptyParts);
+          if(infoList.size()>=4){
+            imgW=infoList.at(0).toInt(&isOk);
+            if(!isOk)break;
+            imgH=infoList.at(1).toInt(&isOk);
+            if(!isOk)break;
+            square=infoList.at(2).toInt(&isOk);
+            if(!isOk)break;
+            line=infoList.at(3).toInt(&isOk);
+            if(!isOk)break;
+
+            if(infoList.size()>=5){
+              _bkColor=QColor(infoList.at(4).toUInt(&isOk));
+              if(!isOk)break;
+            }
+          }else isOk=false;
+          break;
+        }
+        
+        
+        QStringList strList=str.split(" ");
+        if(colorTableLoad){
+          colorTable.append(strList.at(0).toUInt(&isOk));
+          if(!isOk)break;
+          if(strList.size()==2){
+            id.append(strList.at(1).toInt(&isOk));
+            if(!isOk)break;
+          }
+        }
+      }
+      file.close();
+    }else{
+      Info::message(trUtf8("File not found! - ")+path);
+      return;
+    }
+    
+
+    if(isOk){
+      saveRegistry(QFileInfo(fileName));
+      
+      ui.squareSB->setValue(square);
+      ui.lineSB->setValue(line);
+      //ui.dwImage->setEnabled(false);
+
+      //imageViewer->scene()->clear();
+      //crostiViewer->scene()->clear();
+      crostiClear();
+
+      _isColorTableUpdated=false;
+      _isSchemeUpdated=false;
+
+      schemeFromFile(fileName);
+      schemeCreate();
+
+      setBackground(_bkColor);
+
+      _schemeName=fileName;
+      setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Design: ")+_schemeName+"]");
+
+      //ui.tabWidget->setCurrentIndex(1);
+      setCurrentTab(1);
+    }else Info::message(trUtf8("Can't open the design - wrong file format!"));
+ }
+}
+
+
+
+void MainWindow::saveDialog()
+{
+  if((_schemeName==trUtf8("new"))||(_schemeName==""))
+    saveSchemeDialog();
+  else schemeSave(_schemeName);
+}
+
+
+
+void MainWindow::exportDialog()
+{
+ switch(ui.tabWidget->currentIndex()){
+   case 0:{
+     saveImageDialog();
+   }break;
+   case 1:{
+     saveSchemeDialog();
+   }break;
+   case 2:{
+     saveColorTableDialog();
+   }break;
+   case 3:{
+     saveCrostiDialog();
+   }break;
+ }
+}
+
+
+int MainWindow::colorID(const QColor& cl)const
+{
+  for(int clId=0;clId<colorTable.size();clId++)
+    if(cl==colorTable.at(clId))return clId;
+  return 0;
+}
+
+
+QDialog::DialogCode MainWindow::saveSchemeDialog(){
+ QDialog::DialogCode result=QDialog::Rejected;
+ if(colorTable.size()){
+   QString filter=trUtf8("Crosti design (*.cst);;Portable document file (*.pdf);;")+Info::imageFilter(QImageWriter::supportedImageFormats());
+   QFileDialog *saveDialog=new QFileDialog(this,trUtf8("Save design"),_schemePath,filter);
+   saveDialog->setAcceptMode(QFileDialog::AcceptSave);
+   saveDialog->setFileMode(QFileDialog::AnyFile);
+   saveDialog->selectFile(_schemeName);
+   if(saveDialog->exec()){
+     result=QDialog::Accepted;
+     QString fileName=saveDialog->selectedFiles().at(0);
+     checkSuffix(&fileName,saveDialog->selectedNameFilter());
+     switch(analyzeSuffix(QFileInfo(fileName).suffix())){
+       //Рисунки
+       case 0:{
+                statusBar()->showMessage(Info::message(Info::msgPleaseWait));
+                bool saved=view->toImage().save(fileName,0,100);
+                if(saved)
+                  _picturePath=QFileInfo(fileName).canonicalPath();
+                else
+                  Info::messageSplash(Info::msgImageSaveError);
+                statusBar()->clearMessage();
+              };break;
+       //cst
+       case 1:{
+                if(!schemeSave(fileName))
+                  return QDialog::Rejected;
+              };break;
+       //pdf
+       case 2:{
+                QPrinter printerPDF(QPrinter::ScreenResolution);
+                printerPDF.setOutputFormat(QPrinter::PdfFormat);
+                printerPDF.setOutputFileName(fileName);
+                printScheme(&printerPDF);
+                _picturePath=QFileInfo(fileName).canonicalPath();
+              };break;
+     }
+   }
+ }else Info::messageSplash(trUtf8("Nothing to save - the design isn't created!"));
+ return result;
+}
+
+
+
+
+bool MainWindow::schemeSave(QString fileName)
+{
+  QFile file(fileName);
+  if(file.open(QIODevice::WriteOnly|QIODevice::Text)){
+    QTextStream out(&file);
+
+    QString paletteName = ui.dwPalette->property("paletteName").toString();
+
+    out << "#COLOR TABLE: " << paletteName << endl;
+    for(int i=0;i<colorTable.size();i++){
+      int num=NO_ICON;
+      if(i<paletteModel->rowCount()){
+        QModelIndex index=paletteModel->index(i,1);
+        num=paletteModel->data(index,Qt::UserRole).toInt();
+      }
+      out<<colorTable.at(i)<<" "<<num<<endl;
+    }
+    out<<endl;
+    out<<"#SCHEME CONTENT"<<endl;
+    out<<view->schemeSize().width()<<" "<<view->schemeSize().height()<<" "<<ui.squareSB->value()<<" "<<ui.lineSB->value()<<" "<<_bkColor.rgb()<<endl;
+
+    int sz=view->spriteSize()+view->lineSize();
+    int max=20;
+    int pbdiv=sz/max;
+    if(sz<max)pbdiv=1;
+
+
+    progressDialog pb(trUtf8("Saving cross stitch"),trUtf8("Cancel"),0,max+1);
+    pb.show();
+
+
+    for(int i=0;i<view->spriteSize();i++){
+      Sprite *sp=view->getSprite(i);
+      int clId=colorID(sp->color());
+
+      //Цвет = _bkColor и iconID = INT_MAX определяют цвет фона.
+      if((sp->color()==_bkColor)&&(sp->iconID()==INT_MAX))clId=-1;
+
+      int x=int((sp->pos().x()-view->dx())/view->squarePix());
+      int y=int((sp->pos().y()-view->dx())/view->squarePix());
+
+      out<<x<<" "<<y<<" "<<clId;
+      int stId=static_cast<int>(sp->stitch());
+      if(stId!=0)out<<" "<<stId;
+      out<<endl;
+
+      if(i%pbdiv==0)pb.addValue(1);
+      if(pb.wasCanceled()){
+        file.close();
+        QFile::remove(fileName);
+        return false;
+      }
+    }
+    for(int i=0;i<view->lineSize();i++){
+      Line* ln=view->getLine(i);
+      int clId=colorID(ln->color());
+      out<<*ln<<" "<<clId<<endl;
+
+      if(i%pbdiv==0)pb.addValue(1);
+      if(pb.wasCanceled()){
+        file.close();
+        QFile::remove(fileName);
+        return false;
+      }
+    }
+    file.close();
+
+    _isSchemeUpdated=false;
+    _schemeName=fileName;
+    _schemePath=QFileInfo(fileName).canonicalPath();
+    saveRegistry(QFileInfo(_schemeName));
+    setWindowTitle(QApplication::applicationName()+" - ["+trUtf8("Scheme: ")+_schemeName+"]");
+  }else{
+    Info::messageSplash(Info::msgSchemeSaveError);
+    return false;
+  }
+
+  return true;
+}
+
+
+/*
+void MainWindow::setScaleScheme(int factor)
+{
+ view->setScale(qreal(factor)/100);
+
+ adjustScrollBar(ui.scrollArea1->horizontalScrollBar(),factor/100);
+ adjustScrollBar(ui.scrollArea1->verticalScrollBar(),factor/100);
+}
+
+
+void MainWindow::setScaleColorTable(int factor)
+{
+ ui.colorView->resetTransform();
+ qreal scale=qreal(factor)/100;
+ ui.colorView->scale(scale,scale);
+}
+
+
+void MainWindow::setScaleCrosti(int factor)
+{
+ ui.crostiView->resetTransform();
+ qreal scale=qreal(factor)/100;
+ ui.crostiView->scale(scale,scale);
+}
+
+
+void MainWindow::setScaleImage(int factor)
+{
+ ui.imageView->resetTransform();
+ qreal scale=qreal(factor)/100;
+ ui.imageView->scale(scale,scale);
+}
+*/
+/*
+void MainWindow::scaleResetBtnPress()
+{
+ ui.scaleSB0->setValue(100);
+}
+*/
+/*
+void MainWindow::scaleResetBtn1Press()
+{
+ ui.scaleSB1->setValue(100);
+}
+*/
+/*
+void MainWindow::scaleResetBtn2Press()
+{
+ ui.scaleSB2->setValue(100);
+}
+
+
+void MainWindow::scaleResetBtn3Press()
+{
+ ui.scaleSB3->setValue(100);
+}
+*/
+
+/*
+void MainWindow::adjustScrollBar(QScrollBar *scrollBar,double factor)
+{
+ scrollBar->setValue(int(factor*scrollBar->value()+((factor-1)*scrollBar->pageStep()/2)));
+}
+*/
+
+void MainWindow::setStyle(const QString &name) {
+    if (name == NO_STYLE)
+        return;
+    QApplication::setStyle(QStyleFactory::create(name));
+    QSettings rsettings(QApplication::organizationName(), QApplication::applicationName());
+    rsettings.setValue("style", name);
+}
+
+
+void MainWindow::setUnits(int id){
+   _units=id;
+   QSettings rsettings(QApplication::organizationName(),QApplication::applicationName());
+   rsettings.setValue("units",_units);
+}
+
+
+void MainWindow::priceBtnPress()
+{
+ float res = 0;
+ float csprice = float(0.3);
+ 
+ res=imgW*imgH*csprice;
+ 
+ //Кц - количество цветов
+ if(colorTable.size()>25)
+   res+=(colorTable.size()-25)*res*0.01;
+ 
+ 
+ //Цк - цвет канвы (вычисление компоненты Lightness формата HSL)
+ if(lightness(_bkColor)<128)res+=res*0.25;
+ 
+ //Рк - размер канвы
+ if(ui.squareSB1->value()>14)
+   res+=res*(0.25-0.015*(ui.squareSB1->maximum()-ui.squareSB1->value()));
+ 
+ 
+ //Рс - разработка схемы
+ res+=0.3*res;
+ 
+ 
+ int time=int(imgW*imgH/75);
+ //Время вышивания
+ Info::message(trUtf8("Cross stitch price: ")+QString::number(res)+trUtf8(" rub.")+"<br>"+
+              trUtf8("Time to complete: ")+QString::number(time)+trUtf8(" h. / ")+
+              QString::number(int(time/5))+trUtf8(" d."));
+}
+
+
+float MainWindow::random(int Max)
+{
+ static bool firstTime = true;
+ if(firstTime){
+            firstTime = false;
+            QTime midnight(0, 0, 0);
+            srand(midnight.secsTo(QTime::currentTime()));
+ }
+ float res=0;
+ res=rand()%1000;
+ res/=1000;
+ return res*Max;
+}
+
+
+
+float MainWindow::lightness(QColor color)
+{
+//Вычисление компоненты Lightness формата HSL
+ QList<int>col;
+ col.append(color.red());
+ col.append(color.green());
+ col.append(color.blue());
+ for(int i=0;i<col.size();i++){
+   int max=0;
+   int num=0;
+   for(int j=i;j<col.size();j++){
+     if(col.at(j)>max){
+       max=col.at(j);
+       num=j;
+     }
+   }
+   col.swap(i,num);
+ }
+  
+ return 0.5*(col.at(0)+col.at(col.size()-1));
+}
+

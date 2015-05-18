@@ -1,0 +1,23 @@
+
+1. MAKING FROM SOURCE
+    If you dowloaded "share" and "lib" folders, proceed to INSTALLATION section.
+    ProjectLineCounter plugin built using Qt 5.3.0 and should work with Qt Creator 3.4.0 and above.
+	1.1  If you haven't Qt Creator on your PC yet, download and install it now.
+        1.2  Download Qt Creator (3.4.0 or above) source files.
+	1.3  Build Qt Creator from source. For more information read: http://qt-project.org/wiki/Building-Qt-Creator-from-Git
+	1.4  From now you should have two Qt Creators: installed Qt Creator (step 1.1) and built from source Qt Creator (step 1.3).
+        1.5  Open "ProjectLineCounter/src/src.pro" with installed Qt Creator.
+        1.6  In "src.pro" change QTCREATOR_SOURCES variable to path to downloaded Qt Creator source
+files (step 1.2).
+        1.7  In "src.pro" change IDE_BUILD_TREE variable to path where you built Qt Creator (step 1.3).
+	1.8  Hit "Run" button.
+	1.9  When "Custom Executable" window appear, select Qt Creator executable you just built (step 1.3).
+        1.10 When built from source Qt Creator starts, enable ProjectLineCounter. Look at steps 2.3-2.4 for details.
+	
+
+2. INSTALLATION
+        ProjectLineCounter should work with Qt Creator 3.4.0.
+        2.1  Download Qt Creator 3.4.0 (or above) from url: http://www.qt.io/download/#qt-creator.
+        2.2  Place "share" and "lib" folders to folder where Qt Creator was installed.
+        2.3  Start Qt Creator and open "Help->About Plugins..." menu.
+        2.4  Locate "ProjectLineCounter" and check "Load" checkbox.

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--Written on Thu Feb 28 06:33:28 2013 by Qt Creator 2.6.1-->
+<externaltool id="New_Tool">
+    <description>krazy2</description>
+    <displayname>krazy2</displayname>
+    <category>Static Analayzers</category>
+    <executable output="showinpane" error="showinpane" modifiesdocument="no">
+        <path>qpt</path>
+        <arguments>--qtc-plugin --tool=/usr/local/Krazy2/bin/krazy2  %{CurrentProject:FilePath}</arguments>
+        <workingdirectory>%{CurrentProject:Path}</workingdirectory>
+    </executable>
+</externaltool>

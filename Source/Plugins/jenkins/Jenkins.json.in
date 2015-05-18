@@ -1,0 +1,12 @@
+{
+    \"Name\" : \"Jenkins\",
+    \"Version\" : \"$$QTCREATOR_VERSION$$VERSION_SUFFIX\",
+    \"CompatVersion\" : \"$$QTCREATOR_COMPAT_VERSION\",
+    \"Vendor\" : \"$$PLUGINS_PACK_VENDOR\",
+    \"Copyright\" : \"(C) 2015 David Dibben, Michael Sprauer\",
+    \"License\" : \"This plugin may be used under the terms of the GNU Lesser General Public License version 2.1 as published by the Free Software Foundation.  Please review the following information to ensure the GNU Lesser General Public License version 2.1 requirements will be met: http://www.gnu.org/licenses/old-licenses/lgpl-2.1.html.\",
+    \"Category\" : \"Qt Creator\",
+    \"Description\" : \"Jenkins plugin to show the status of the builds.\",
+    \"Url\" : \"https://github.com/MichaelSp/QtCreator-Jenkins-Plugin\",
+    $$dependencyList
+}

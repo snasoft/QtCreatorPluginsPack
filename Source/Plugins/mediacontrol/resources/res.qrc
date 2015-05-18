@@ -1,0 +1,16 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file>icons/backward.png</file>
+        <file>icons/forward.png</file>
+        <file>icons/pause.png</file>
+        <file>icons/play.png</file>
+        <file>icons/play_pause1.png</file>
+        <file>icons/play_pause2.png</file>
+        <file>icons/backward_hower.png</file>
+        <file>icons/forward_hower.png</file>
+        <file>icons/play_pause_hower.png</file>
+    </qresource>
+    <qresource prefix="/styles">
+        <file>styles/toolButtonStyles.qss</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,2 @@
+Qtcreator xml config files
+C:\Users\<user>\AppData\Roaming\QtProject\qtcreator\externaltools

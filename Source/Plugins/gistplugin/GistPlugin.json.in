@@ -1,0 +1,11 @@
+{
+    \"Name\" : \"GitHubGist\",
+    \"Version\" : \"$$QTCREATOR_VERSION$$VERSION_SUFFIX\",
+    \"CompatVersion\" : \"$$QTCREATOR_COMPAT_VERSION\",
+    \"Vendor\" : \"$$PLUGINS_PACK_VENDOR\",
+    \"Copyright\" : \"(C) Vasiliy I.Kolesnikov\",
+    \"License\" : \"The MIT License (MIT)\",
+    \"Description\" : \"GitHub Gist service integration plugin\",
+    \"Url\" : \"https://github.com/justCxx/QtcGistPlugin\",
+    $$dependencyList
+}

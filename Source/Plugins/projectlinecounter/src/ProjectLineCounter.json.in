@@ -1,0 +1,19 @@
+{
+    \"Name\" : \"ProjectLineCounter\",
+    \"Version\" : \"$$QTCREATOR_VERSION$$VERSION_SUFFIX\",
+    \"CompatVersion\" : \"$$QTCREATOR_COMPAT_VERSION\",
+    \"Vendor\" : \"$$PLUGINS_PACK_VENDOR\",
+    \"Copyright\" : \"2014 (C) Sergey Levin\",
+    \"License\" : [ \"GNU Lesser General Public License, Version 2.1\",
+                    \"\",
+                    \"This is free software; you can redistribute and/or modify it under the terms\",
+                    \"of the GNU Lesser General Public License, Version 2.1 as published\",
+                    \"by the Free Software Foundation.\",
+                    \"See accompanying fike LICENSE.txt file or\",
+                    \"copy at http://www.gnu.org/licenses/lgpl-2.1-standalone.html for more information.\",
+                    \"\" ],
+    \"Category\" : \"Code Analyzer\",
+    \"Description\" : \"Adds info string to the Qt Creator Editor toolbar that counts lines in the current file and whole project if pro-file opened\",
+    \"Url\" : \"http://sourceforge.net/projects/projectlinecounterplugin/\",
+    $$dependencyList
+}

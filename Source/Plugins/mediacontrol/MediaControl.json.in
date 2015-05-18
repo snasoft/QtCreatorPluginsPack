@@ -1,0 +1,12 @@
+{
+    \"Name\" : \"MediaControl\",
+    \"Version\" : \"$$QTCREATOR_VERSION$$VERSION_SUFFIX\",
+    \"CompatVersion\" : \"$$QTCREATOR_COMPAT_VERSION\",
+    \"Vendor\" : \"$$PLUGINS_PACK_VENDOR\",
+    \"Copyright\" : \"(C) 2015 Andrei Shikalev\",
+    \"License\" : \"LGPLv3\",
+    \"Category\" : \"Qt Creator\",
+    \"Description\" : \"Add audio player control to QtCreator IDE.\",
+    \"Url\" : \"http://sourceforge.net/projects/audiocontrolplugin \",
+    $$dependencyList
+}

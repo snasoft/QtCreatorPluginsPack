@@ -1,0 +1,36 @@
+version 0.8 July 2013
+
+================
+
+  * Allow to use another config file
+
+  * Fixed Bug: qmake not found MUST quit with error message
+
+  * Fixed Bug: qt project file does not exist  MUST quit with error message
+
+  * Fixed Bug: qtcreator plugin active and qtcreator not found MUST emit with error message
+
+  * Fixed Bug: in comparing versions when requiring minimal version (converted to string)
+
+  * option to return the number of created issues
+
+  * every path (tool path or include path) MUST be checked against spaces, if it contains space, put it between quotes (check on Linux)
+[Windows version]
+
+  * When looking for tools on Windows add sufix ".exe"
+
+  * When looking for tools search under "c:\Program Files"
+
+  * Search for qmake.exe and qtcreator.exe under C:\Qt\*.*
+
+  * Added Windows installer
+
+
+
+
+
+version 0.7 April 2013
+
+============================
+
+Initial version

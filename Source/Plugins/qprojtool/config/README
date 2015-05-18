@@ -1,0 +1,12 @@
+
+
+You can use the script install.sh to copy the xml configuration files to your home dir, as:
+     
+       $ sh install.sh
+
+The xml files assume:
+   1. qpt is already in the PATH, if not ajust the the command line or put qpt inside a directory which is in the PATH variable
+   2. the same as (1) for cppcheck
+   3. Krazy is installed in /usr/local/Krazy2
+
+Make any adjustments if necessary

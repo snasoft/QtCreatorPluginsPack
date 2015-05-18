@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--Written on Thu Feb 28 06:33:16 2013 by Qt Creator 2.6.1-->
+<externaltool id="cppcheckwin">
+    <description>cppcheck</description>
+    <displayname>cppcheck</displayname>
+    <category>Static Analayzers</category>
+    <executable output="showinpane" error="showinpane" modifiesdocument="no">
+        <path>C:/Program Files/qpt/qpt.exe</path>
+        <arguments>-t cppcheck -q  %{CurrentProject:FilePath}</arguments>
+    </executable>
+</externaltool>

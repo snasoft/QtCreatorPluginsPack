@@ -1,0 +1,11 @@
+<script src="qrc:/js/require.js"></script>
+<script>
+function update (plainText) {
+  require (["qrc:/js/marked.js"], function (markdown) {
+    document.body.innerHTML = markdown (plainText);
+  });
+}
+</script>
+<body onload="init()">
+<script>function init () {update(%1);}</script>
+</body>
